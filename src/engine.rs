@@ -69,7 +69,7 @@ impl<A: Api> Engine<A> {
                 match self.api.stop() {
                     Ok(session) => {
                         let elapsed = now.checked_duration_since(started).unwrap_or_default();
-                        let deadline = (started + elapsed.saturating_mul(3)).max(now + MIN_TIMEOUT);
+                        let deadline = now + MIN_TIMEOUT.max(elapsed.saturating_mul(3));
                         self.state = State::Finalizing {
                             id: session.id,
                             deadline,
@@ -463,13 +463,13 @@ mod tests {
         engine.toggle(t0 + Duration::from_secs(100));
 
         assert!(matches!(engine.state(), State::Finalizing { deadline, .. }
-                if *deadline == t0 + Duration::from_secs(300)));
+                if *deadline == t0 + Duration::from_secs(400)));
 
         assert!(matches!(
-            engine.tick(t0 + Duration::from_secs(299)),
+            engine.tick(t0 + Duration::from_secs(399)),
             Update::None
         ));
-        match engine.tick(t0 + Duration::from_secs(301)) {
+        match engine.tick(t0 + Duration::from_secs(401)) {
             Update::Error(message) => assert!(message.contains("timed out")),
             other => panic!("expected Error, got {other:?}"),
         }
