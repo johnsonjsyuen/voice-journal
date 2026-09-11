@@ -5,6 +5,7 @@ pub mod tray;
 
 use crate::api::HttpApi;
 use crate::engine::{Engine, State, Update};
+use crate::metrics::Metrics;
 use crate::{config, discovery, journal};
 use chrono::Local;
 use fs4::TryLockError;
@@ -14,6 +15,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use tray_icon::TrayIconEvent;
 use tray_icon::menu::MenuEvent;
@@ -44,7 +46,7 @@ pub fn run() -> Result<(), String> {
 
     let (command_tx, command_rx) = mpsc::channel();
     let (event_tx, event_rx) = mpsc::channel();
-    spawn_worker(command_rx, event_tx);
+    let worker = spawn_worker(command_rx, event_tx);
 
     let mut builder = EventLoop::builder();
     builder.with_activation_policy(ActivationPolicy::Accessory);
@@ -63,11 +65,29 @@ pub fn run() -> Result<(), String> {
         notice: None,
         no_speech: false,
         error: None,
+        metrics: Metrics::default(),
+        worker: Some(worker),
+        quitting: false,
+        worker_done: false,
         _lock: lock,
     };
-    event_loop
-        .run_app(&mut app)
-        .map_err(|e| format!("event loop error: {e}"))?;
+    let run_result = event_loop.run_app(&mut app);
+
+    // If the loop exited for any other reason (startup failure), make sure the
+    // worker stops too; then wait for it so a final `/stop` cannot be lost.
+    if !app.quitting {
+        let _ = app.commands.send(WorkerCommand::Quit);
+    }
+    if let Some(worker) = app.worker.take()
+        && worker.join().is_err()
+    {
+        log::error!("engine worker panicked");
+    }
+    while let Ok(event) = app.events.try_recv() {
+        app.handle_worker_event(event);
+    }
+
+    run_result.map_err(|e| format!("event loop error: {e}"))?;
     match app.error {
         Some(error) => Err(error),
         None => Ok(()),
@@ -109,7 +129,7 @@ fn discovery_message(error: &discovery::DiscoveryError) -> String {
     }
 }
 
-fn spawn_worker(commands: Receiver<WorkerCommand>, events: Sender<WorkerEvent>) {
+fn spawn_worker(commands: Receiver<WorkerCommand>, events: Sender<WorkerEvent>) -> JoinHandle<()> {
     std::thread::spawn(move || {
         let mut engine: Option<Engine<HttpApi>> = None;
         loop {
@@ -144,10 +164,22 @@ fn spawn_worker(commands: Receiver<WorkerCommand>, events: Sender<WorkerEvent>) 
                     }
                 }
                 Ok(WorkerCommand::Quit) => {
-                    if let Some(engine) = engine.as_mut()
-                        && matches!(engine.state(), State::Recording { .. })
-                    {
-                        let _ = engine.toggle(Instant::now());
+                    // Stop an active recording, then keep polling until the
+                    // transcript is final so the last journal entry is not lost.
+                    if let Some(engine) = engine.as_mut() {
+                        let deadline = Instant::now() + crate::engine::SHUTDOWN_TIMEOUT;
+                        crate::engine::shutdown(
+                            engine,
+                            deadline,
+                            Instant::now,
+                            std::thread::sleep,
+                            |update, state| {
+                                let _ = events.send(WorkerEvent {
+                                    update,
+                                    state: Some(state),
+                                });
+                            },
+                        );
                     }
                     break;
                 }
@@ -163,7 +195,7 @@ fn spawn_worker(commands: Receiver<WorkerCommand>, events: Sender<WorkerEvent>) 
                 Err(RecvTimeoutError::Disconnected) => break,
             }
         }
-    });
+    })
 }
 
 fn copy_to_clipboard(text: &str) {
@@ -198,6 +230,10 @@ struct App {
     notice: Option<String>,
     no_speech: bool,
     error: Option<String>,
+    metrics: Metrics,
+    worker: Option<JoinHandle<()>>,
+    quitting: bool,
+    worker_done: bool,
     _lock: File,
 }
 
@@ -209,6 +245,9 @@ impl App {
     }
 
     fn drain_hotkeys(&mut self) {
+        if self.quitting {
+            return;
+        }
         for event in GlobalHotKeyEvent::receiver().try_iter() {
             let matches_hotkey = self
                 .hotkey
@@ -222,7 +261,7 @@ impl App {
         }
     }
 
-    fn drain_menu(&mut self, event_loop: &ActiveEventLoop) {
+    fn drain_menu(&mut self) {
         for event in MenuEvent::receiver().try_iter() {
             if event.id() == tray::MENU_ID_OPEN_JOURNAL {
                 if let Err(e) = tray::open_path(&self.journal_path) {
@@ -232,9 +271,12 @@ impl App {
                 if let Err(e) = tray::open_path(&self.config_path) {
                     log::error!("failed to open config: {e}");
                 }
-            } else if event.id() == tray::MENU_ID_QUIT {
+            } else if event.id() == tray::MENU_ID_QUIT && !self.quitting {
+                // The worker stops/finishes any recording before it exits; the
+                // event loop stays alive until then so the final transcript can
+                // still be appended.
+                self.quitting = true;
                 let _ = self.commands.send(WorkerCommand::Quit);
-                event_loop.exit();
             }
         }
     }
@@ -245,7 +287,10 @@ impl App {
                 Ok(event) => self.handle_worker_event(event),
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
-                    log::error!("engine worker stopped");
+                    if !self.quitting {
+                        log::error!("engine worker stopped unexpectedly");
+                    }
+                    self.worker_done = true;
                     break;
                 }
             }
@@ -254,10 +299,13 @@ impl App {
 
     fn handle_worker_event(&mut self, event: WorkerEvent) {
         match event.update {
-            Update::Transcribed { text, .. } => match text {
-                Some(text) if !text.trim().is_empty() => self.append_transcript(&text),
-                _ => self.no_speech = true,
-            },
+            Update::Transcribed { text, duration, .. } => {
+                self.metrics.record(text.as_deref(), duration, Local::now());
+                match text {
+                    Some(text) if !text.trim().is_empty() => self.append_transcript(&text),
+                    _ => self.no_speech = true,
+                }
+            }
             Update::Error(message) => self.notice = Some(message),
             Update::None => {}
         }
@@ -265,7 +313,7 @@ impl App {
         if event.state.is_some() || self.notice.is_some() || self.no_speech {
             let snapshot = event.state.as_ref().map(tray::TrayState::from_engine);
             if let Some(tray) = &self.tray {
-                tray.set_state(&self.tray_state(snapshot.as_ref()));
+                tray.set_state(&self.tray_state(snapshot.as_ref()), &self.metrics);
             }
         }
     }
@@ -329,8 +377,12 @@ impl ApplicationHandler for App {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.drain_worker();
         self.drain_hotkeys();
-        self.drain_menu(event_loop);
+        self.drain_menu();
         for _ in TrayIconEvent::receiver().try_iter() {}
+        if self.quitting && self.worker_done {
+            event_loop.exit();
+            return;
+        }
         event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + UI_TICK));
     }
 }

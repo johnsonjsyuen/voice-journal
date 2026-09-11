@@ -146,6 +146,27 @@ fn error_message(response: ureq::Response) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// Probes the always-public `GET /v1/status` endpoint from the discovery file.
+/// Used by `--check`; absence of TypeWhisper is reported as an error here and
+/// treated as a warning by the caller.
+pub fn probe_status(discovery: &Discovery) -> Result<(), ApiError> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(1))
+        .timeout(Duration::from_secs(5))
+        .build();
+    let url = format!("http://127.0.0.1:{}/v1/status", discovery.port);
+    match agent.get(&url).call() {
+        Ok(_) => Ok(()),
+        Err(ureq::Error::Status(401, _)) => Err(ApiError::Unauthorized),
+        Err(ureq::Error::Status(status, response)) => {
+            let fallback = response.status_text().to_string();
+            let message = error_message(response).unwrap_or(fallback);
+            Err(ApiError::Http { status, message })
+        }
+        Err(ureq::Error::Transport(transport)) => Err(ApiError::Unavailable(transport.to_string())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -394,5 +415,53 @@ mod tests {
         let err = api.start().unwrap_err();
 
         assert!(matches!(err, ApiError::Unavailable(_)), "got {err:?}");
+    }
+
+    fn discovery_for(port: u16) -> Discovery {
+        Discovery {
+            port,
+            token: None,
+            version: None,
+        }
+    }
+
+    #[test]
+    fn status_probe_succeeds_on_200() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(GET).path("/v1/status");
+            then.status(200).body(r#"{"version":1}"#);
+        });
+
+        probe_status(&discovery_for(server.port())).unwrap();
+
+        mock.assert_hits(1);
+    }
+
+    #[test]
+    fn status_probe_reports_http_errors() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(GET).path("/v1/status");
+            then.status(503)
+                .body(r#"{"error":{"message":"starting up"}}"#);
+        });
+
+        match probe_status(&discovery_for(server.port())).unwrap_err() {
+            ApiError::Http { status, message } => {
+                assert_eq!(status, 503);
+                assert!(message.contains("starting up"), "message was {message:?}");
+            }
+            other => panic!("expected Http error, got {other:?}"),
+        }
+        mock.assert_hits(1);
+    }
+
+    #[test]
+    fn status_probe_connection_refused_is_unavailable() {
+        assert!(matches!(
+            probe_status(&discovery_for(1)),
+            Err(ApiError::Unavailable(_))
+        ));
     }
 }

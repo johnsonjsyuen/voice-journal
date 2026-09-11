@@ -1,12 +1,15 @@
 //! Menu-bar tray icon, menu, and programmatically rendered icon states.
 
 use crate::engine::State;
+use crate::metrics::{self, Metrics, truncate};
 use std::cell::RefCell;
 use std::path::Path;
 use tray_icon::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tray_icon::{BadIcon, Icon, TrayIcon, TrayIconBuilder};
 
 pub const MENU_ID_STATUS: &str = "status";
+pub const MENU_ID_LAST: &str = "last";
+pub const MENU_ID_TODAY: &str = "today";
 pub const MENU_ID_OPEN_JOURNAL: &str = "open-journal";
 pub const MENU_ID_OPEN_CONFIG: &str = "open-config";
 pub const MENU_ID_QUIT: &str = "quit";
@@ -113,16 +116,31 @@ pub fn open_path(path: &Path) -> std::io::Result<()> {
 pub struct Tray {
     icon: TrayIcon,
     status_item: MenuItem,
-    last_state: RefCell<Option<TrayState>>,
+    last_item: MenuItem,
+    today_item: MenuItem,
+    last_snapshot: RefCell<Option<TraySnapshot>>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct TraySnapshot {
+    state: TrayState,
+    last: String,
+    today: String,
 }
 
 impl Tray {
     pub fn new() -> Result<Self, String> {
         let idle = TrayState::Idle;
+        let initial = Metrics::default();
         let status_item = MenuItem::with_id(MENU_ID_STATUS, status_text(&idle), false, None);
+        let last_item = MenuItem::with_id(MENU_ID_LAST, metrics::last_line(&initial), false, None);
+        let today_item =
+            MenuItem::with_id(MENU_ID_TODAY, metrics::today_line(&initial), false, None);
         let menu = Menu::new();
         menu.append_items(&[
             &status_item,
+            &last_item,
+            &today_item,
             &PredefinedMenuItem::separator(),
             &MenuItem::with_id(MENU_ID_OPEN_JOURNAL, "Open Journal…", true, None),
             &MenuItem::with_id(MENU_ID_OPEN_CONFIG, "Open Config…", true, None),
@@ -142,12 +160,19 @@ impl Tray {
         Ok(Self {
             icon: tray_icon,
             status_item,
-            last_state: RefCell::new(None),
+            last_item,
+            today_item,
+            last_snapshot: RefCell::new(None),
         })
     }
 
-    pub fn set_state(&self, state: &TrayState) {
-        if self.last_state.borrow().as_ref() == Some(state) {
+    pub fn set_state(&self, state: &TrayState, metrics: &Metrics) {
+        let snapshot = TraySnapshot {
+            state: state.clone(),
+            last: metrics::last_line(metrics),
+            today: metrics::today_line(metrics),
+        };
+        if self.last_snapshot.borrow().as_ref() == Some(&snapshot) {
             return;
         }
         match icon(state, ICON_SIZE) {
@@ -165,7 +190,9 @@ impl Tray {
             log::error!("failed to update tray tooltip: {e}");
         }
         self.status_item.set_text(status_text(state));
-        *self.last_state.borrow_mut() = Some(state.clone());
+        self.last_item.set_text(&snapshot.last);
+        self.today_item.set_text(&snapshot.today);
+        *self.last_snapshot.borrow_mut() = Some(snapshot);
     }
 }
 
@@ -193,15 +220,6 @@ fn rasterize(size: u32, color: [u8; 3], inside: impl Fn(f64, f64) -> bool) -> Ve
         }
     }
     rgba
-}
-
-fn truncate(text: &str, max_chars: usize) -> String {
-    let mut chars = text.chars();
-    let mut shortened: String = chars.by_ref().take(max_chars).collect();
-    if chars.next().is_some() {
-        shortened.push('…');
-    }
-    shortened
 }
 
 #[cfg(test)]

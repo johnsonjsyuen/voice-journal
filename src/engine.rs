@@ -4,6 +4,8 @@ use crate::api::{Api, ApiError, SessionStatus};
 use std::time::{Duration, Instant};
 
 const MIN_TIMEOUT: Duration = Duration::from_secs(120);
+pub const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
+pub const SHUTDOWN_POLL: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum State {
@@ -15,6 +17,7 @@ pub enum State {
     Finalizing {
         id: String,
         deadline: Instant,
+        duration: Duration,
         output_file: Option<String>,
     },
     Error {
@@ -28,6 +31,7 @@ pub enum Update {
     Transcribed {
         text: Option<String>,
         output_file: Option<String>,
+        duration: Duration,
     },
     Error(String),
 }
@@ -62,6 +66,28 @@ impl<A: Api> Engine<A> {
         }
     }
 
+    pub fn is_finalizing(&self) -> bool {
+        matches!(self.state, State::Finalizing { .. })
+    }
+
+    pub fn output_file(&self) -> Option<&str> {
+        match &self.state {
+            State::Finalizing { output_file, .. } => output_file.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Begins shutdown: stops an active recording so TypeWhisper can finalize
+    /// rather than leaving the microphone hot. Returns `Update::None` when
+    /// there is nothing to stop.
+    pub fn begin_shutdown(&mut self, now: Instant) -> Update {
+        if matches!(self.state, State::Recording { .. }) {
+            self.toggle(now)
+        } else {
+            Update::None
+        }
+    }
+
     pub fn toggle(&mut self, now: Instant) -> Update {
         match &self.state {
             State::Recording { started, .. } => {
@@ -73,6 +99,7 @@ impl<A: Api> Engine<A> {
                         self.state = State::Finalizing {
                             id: session.id,
                             deadline,
+                            duration: elapsed,
                             output_file: None,
                         };
                         self.last_error = None;
@@ -101,12 +128,13 @@ impl<A: Api> Engine<A> {
     }
 
     pub fn tick(&mut self, now: Instant) -> Update {
-        let (id, deadline, last_output_file) = match &self.state {
+        let (id, deadline, duration, last_output_file) = match &self.state {
             State::Finalizing {
                 id,
                 deadline,
+                duration,
                 output_file,
-            } => (id.clone(), *deadline, output_file.clone()),
+            } => (id.clone(), *deadline, *duration, output_file.clone()),
             _ => return Update::None,
         };
         if now >= deadline {
@@ -124,6 +152,7 @@ impl<A: Api> Engine<A> {
                     Update::Transcribed {
                         text: session.text,
                         output_file: session.output_file,
+                        duration,
                     }
                 }
                 SessionStatus::Failed => {
@@ -165,6 +194,39 @@ impl<A: Api> Engine<A> {
         };
         self.last_error = Some(message.clone());
         Update::Error(message)
+    }
+}
+
+/// Drives the engine to a terminal state after a quit request.
+///
+/// Stops an active recording and polls until transcription completes, fails,
+/// or `quit_deadline` passes, so the final transcript can still be emitted and
+/// persisted before the process exits. Every update (and the resulting state)
+/// is passed to `emit`; `now` and `sleep` are injected so the flow is testable.
+pub fn shutdown<A: Api>(
+    engine: &mut Engine<A>,
+    quit_deadline: Instant,
+    mut now: impl FnMut() -> Instant,
+    mut sleep: impl FnMut(Duration),
+    mut emit: impl FnMut(Update, State),
+) {
+    let update = engine.begin_shutdown(now());
+    emit(update, engine.state().clone());
+    while engine.is_finalizing() {
+        if now() >= quit_deadline {
+            let output_file = engine.output_file().unwrap_or("<unknown>");
+            log::warn!(
+                "shutdown timed out waiting for TypeWhisper transcription (output_file: {output_file})"
+            );
+            return;
+        }
+        sleep(SHUTDOWN_POLL);
+        let update = engine.tick(now());
+        let terminal = !matches!(update, Update::None);
+        emit(update, engine.state().clone());
+        if terminal {
+            return;
+        }
     }
 }
 
@@ -293,9 +355,10 @@ mod tests {
         let stopped_at = t0 + Duration::from_secs(5);
         assert!(matches!(engine.toggle(stopped_at), Update::None));
         assert!(
-            matches!(engine.state(), State::Finalizing { id, deadline, output_file }
+            matches!(engine.state(), State::Finalizing { id, deadline, duration, output_file }
                 if id == "a"
                     && *deadline == stopped_at + Duration::from_secs(120)
+                    && *duration == Duration::from_secs(5)
                     && output_file.is_none())
         );
 
@@ -306,9 +369,14 @@ mod tests {
         assert!(matches!(engine.state(), State::Finalizing { .. }));
 
         match engine.tick(stopped_at + Duration::from_secs(2)) {
-            Update::Transcribed { text, output_file } => {
+            Update::Transcribed {
+                text,
+                output_file,
+                duration,
+            } => {
                 assert_eq!(text.as_deref(), Some("hi"));
                 assert_eq!(output_file.as_deref(), Some("/tmp/r.wav"));
+                assert_eq!(duration, Duration::from_secs(5));
             }
             other => panic!("expected Transcribed, got {other:?}"),
         }
@@ -432,7 +500,9 @@ mod tests {
         engine.toggle(t0);
 
         match engine.tick(t0 + Duration::from_secs(1)) {
-            Update::Transcribed { text, output_file } => {
+            Update::Transcribed {
+                text, output_file, ..
+            } => {
                 assert_eq!(text, None);
                 assert_eq!(output_file.as_deref(), Some("/tmp/r.wav"));
             }
@@ -561,5 +631,88 @@ mod tests {
             matches!(engine.state(), State::Finalizing { output_file: Some(path), .. }
                 if path == "/tmp/known.wav")
         );
+    }
+
+    #[test]
+    fn shutdown_during_recording_stops_and_emits_final_transcript() {
+        let t0 = Instant::now();
+        let api = MockApi::new()
+            .start(Ok(recording("a")))
+            .stop(Ok(finalizing("a")))
+            .session(Ok(finalizing("a")))
+            .session(Ok(completed("a", Some("last words"))));
+        let mut engine = Engine::new(api);
+        engine.toggle(t0);
+
+        let mut clock = t0;
+        let mut emitted = Vec::new();
+        shutdown(
+            &mut engine,
+            t0 + Duration::from_secs(30),
+            || {
+                clock += Duration::from_millis(250);
+                clock
+            },
+            |_| {},
+            |update, state| emitted.push((update, state)),
+        );
+
+        assert_eq!(engine.api.stop_calls, 1);
+        assert_eq!(engine.api.session_calls, 2);
+        match emitted.last() {
+            Some((Update::Transcribed { text, duration, .. }, State::Idle)) => {
+                assert_eq!(text.as_deref(), Some("last words"));
+                assert_eq!(*duration, Duration::from_millis(250));
+            }
+            other => panic!("expected final transcript, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn shutdown_while_finalizing_keeps_polling_without_second_stop() {
+        let t0 = Instant::now();
+        let api = MockApi::new()
+            .start(Ok(recording("a")))
+            .stop(Ok(finalizing("a")))
+            .session(Ok(completed("a", Some("done"))));
+        let mut engine = Engine::new(api);
+        engine.toggle(t0);
+        engine.toggle(t0);
+
+        let mut clock = t0;
+        let mut last = None;
+        shutdown(
+            &mut engine,
+            t0 + Duration::from_secs(30),
+            || {
+                clock += Duration::from_millis(250);
+                clock
+            },
+            |_| {},
+            |update, _| last = Some(update),
+        );
+
+        assert_eq!(engine.api.stop_calls, 1);
+        assert!(matches!(
+            last,
+            Some(Update::Transcribed {
+                text: Some(text),
+                ..
+            }) if text == "done"
+        ));
+        assert!(matches!(engine.state(), State::Idle));
+    }
+
+    #[test]
+    fn shutdown_while_idle_does_nothing() {
+        let t0 = Instant::now();
+        let mut engine = Engine::new(MockApi::new());
+        let mut emitted = 0;
+
+        shutdown(&mut engine, t0, || t0, |_| {}, |_, _| emitted += 1);
+
+        assert_eq!(engine.api.stop_calls, 0);
+        assert_eq!(emitted, 1);
+        assert!(matches!(engine.state(), State::Idle));
     }
 }

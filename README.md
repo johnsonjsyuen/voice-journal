@@ -46,7 +46,9 @@ A menu bar icon appears (no Dock icon):
 
 - Press **Ctrl+Alt+J** anywhere to start recording; press it again to stop.
 - When transcription finishes, the text is appended to `~/Documents/VoiceJournal.md`.
-- Tray menu: **Open Journal…**, **Open Config…**, **Quit**.
+- The tray menu shows the current status, the last transcript and its duration,
+  and today's recording count/total time, plus **Open Journal…**,
+  **Open Config…**, **Quit**.
 - A brand-new journal gets a `# Voice Journal` header automatically.
 
 ## Configuration
@@ -76,8 +78,8 @@ Crash restarts are automatic; quitting from the tray menu stays quit. Logs go to
 
 ## Troubleshooting
 
-- Run `voice-journal --check` to validate the config, journal path, and
-  TypeWhisper API connection.
+- Run `voice-journal --check` to validate the config, journal writability, and
+  TypeWhisper discovery/API.
 - Tray error **"TypeWhisper API unavailable"** means TypeWhisper isn't running
   or its API Server is disabled (Settings → Advanced).
 - **"No speech detected"** — the recording was silent, so nothing was appended.

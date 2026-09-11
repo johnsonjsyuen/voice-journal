@@ -196,15 +196,22 @@ All errors are logged to stderr, which launchd captures in
 | Command | Behavior |
 |---|---|
 | `voice-journal` | Runs the menu-bar daemon (macOS only). |
-| `voice-journal --check` | Validates config, journal writability, discovery parse; prints a report; exits 0/1. **Does not create tray/hotkey** — used by CI. Exit 0 even if TypeWhisper is absent (reported as a warning). |
+| `voice-journal --check` | Validates config and journal writability (opens the real journal for append when it exists; otherwise probes its parent), parses discovery, and probes `GET /v1/status` when discovery is present; prints a report; exits 0/1. **Does not create tray/hotkey** — used by CI. Exit 0 even if TypeWhisper is absent (reported as a warning). |
 | `voice-journal --version` | Prints version and exits. |
 | `voice-journal --help` | Usage. |
 
-Tray menu: disabled status row (state/last error), `Open Journal…`,
-`Open Config…`, `Quit`. Icons are generated in code as RGBA via
+Tray menu: disabled rows for state/last error, the most recent transcript and
+its duration (`Last: "…" (23m 41s)`, truncated), and today's totals
+(`Today: N recordings · 23m 41s`); then `Open Journal…`, `Open Config…`,
+`Quit`. Icons are generated in code as RGBA via
 `tray_icon::Icon::from_rgba` (no binary assets): idle (template monochrome
 circle, adapts to light/dark menu bar), recording (red circle), error (orange
 square).
+
+Quitting from the tray stops an active recording, polls until transcription
+completes (or a 30 s shutdown deadline passes, logging `output_file`), appends
+the final transcript, and only then joins the worker and exits. A startup
+failure follows the same join path so a pending `/stop` is never dropped.
 
 A `scripts/install-launchd.sh` installs and loads
 `~/Library/LaunchAgents/com.johnson.voice-journal.plist` (`RunAtLoad`,

@@ -1,6 +1,6 @@
 //! Headless `--check` report.
 
-use crate::{config, discovery};
+use crate::{api, config, discovery};
 use std::path::Path;
 
 #[derive(Debug)]
@@ -24,11 +24,11 @@ pub fn run(config_path: &Path, discovery_path: &Path) -> Report {
         }
     };
 
-    match probe_writable(journal_parent(&cfg.journal_path)) {
+    match check_journal(&cfg.journal_path) {
         Ok(()) => lines.push(format!("journal: ok ({})", cfg.journal_path.display())),
         Err(e) => {
             lines.push(format!(
-                "journal: error: cannot create or write {}: {e}",
+                "journal: error: cannot append to {}: {e}",
                 cfg.journal_path.display()
             ));
             ok = false;
@@ -65,6 +65,10 @@ pub fn run(config_path: &Path, discovery_path: &Path) -> Report {
                 "not set"
             };
             lines.push(format!("discovery: ok (port {}, token {token})", d.port));
+            match api::probe_status(&d) {
+                Ok(()) => lines.push(format!("api: ok (port {} /v1/status)", d.port)),
+                Err(e) => lines.push(format!("api: warning: {e}")),
+            }
         }
         Err(e) => lines.push(format!("discovery: warning: {e}")),
     }
@@ -93,6 +97,17 @@ pub fn run_cli() -> i32 {
         println!("{line}");
     }
     if report.ok { 0 } else { 1 }
+}
+
+fn check_journal(path: &Path) -> std::io::Result<()> {
+    if path.exists() {
+        // Validate the actual journal path, not just its parent: it may be a
+        // directory or a file we cannot append to.
+        std::fs::OpenOptions::new().append(true).open(path)?;
+        Ok(())
+    } else {
+        probe_writable(journal_parent(path))
+    }
 }
 
 fn journal_parent(journal_path: &Path) -> &Path {
@@ -227,6 +242,65 @@ mod tests {
         let report = run(&config_path, &missing_discovery(dir.path()));
 
         assert!(!report.ok, "unexpected lines: {:?}", report.lines);
+    }
+
+    #[test]
+    fn journal_path_that_is_a_directory_is_not_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal_path = dir.path().join("VoiceJournal.md");
+        std::fs::create_dir(&journal_path).unwrap();
+        let config_path = write_config(dir.path(), "Ctrl+Alt+KeyJ", &journal_path);
+
+        let report = run(&config_path, &missing_discovery(dir.path()));
+
+        assert!(!report.ok, "unexpected lines: {:?}", report.lines);
+        assert!(report.lines.iter().any(|l| l.starts_with("journal: error")));
+    }
+
+    #[test]
+    fn existing_journal_is_checked_in_place_and_left_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal_path = dir.path().join("journal.md");
+        std::fs::write(&journal_path, "# Voice Journal\n\n- old\n").unwrap();
+        let config_path = write_config(dir.path(), "Ctrl+Alt+KeyJ", &journal_path);
+
+        let report = run(&config_path, &missing_discovery(dir.path()));
+
+        assert!(report.ok, "unexpected lines: {:?}", report.lines);
+        assert_eq!(
+            std::fs::read_to_string(&journal_path).unwrap(),
+            "# Voice Journal\n\n- old\n"
+        );
+    }
+
+    #[test]
+    fn live_api_is_reported_ok() {
+        use httpmock::prelude::*;
+
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(GET).path("/v1/status");
+            then.status(200).body(r#"{"version":1}"#);
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let journal_path = dir.path().join("journal.md");
+        let config_path = write_config(dir.path(), "Ctrl+Alt+KeyJ", &journal_path);
+        let discovery_path = dir.path().join("api-discovery.json");
+        std::fs::write(
+            &discovery_path,
+            format!(r#"{{"port":{},"token":"secret"}}"#, server.port()),
+        )
+        .unwrap();
+
+        let report = run(&config_path, &discovery_path);
+
+        assert!(report.ok, "unexpected lines: {:?}", report.lines);
+        assert!(
+            report.lines.iter().any(|l| l.contains("api: ok")),
+            "api line missing: {:?}",
+            report.lines
+        );
+        mock.assert_hits(1);
     }
 
     #[test]

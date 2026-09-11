@@ -37,3 +37,14 @@ jobs:
       - run: cargo test
       - run: cargo clippy --all-targets -- -D warnings
       - run: ./target/release/voice-journal --check
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp target/release/voice-journal dist/
+          cp scripts/install-launchd.sh dist/
+          tar -czf voice-journal-aarch64-apple-darwin.tar.gz -C dist .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: voice-journal-aarch64-apple-darwin
+          path: voice-journal-aarch64-apple-darwin.tar.gz
+          if-no-files-found: error
