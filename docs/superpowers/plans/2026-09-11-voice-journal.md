@@ -773,13 +773,18 @@ main thread (winit ApplicationHandler):
     event_loop.set_control_flow(ControlFlow::WaitUntil(now + 100ms))
 worker thread:
   loop { recv_timeout(250ms):
-    Command::Toggle -> if no api yet { api = HttpApi::from_discovery(discovery::load(path)?, path) };
-                       engine.toggle(Instant::now())
-    Command::Quit -> std::process::exit(0)
-    timeout -> engine.tick(Instant::now())
+    Command::Toggle ->
+      if engine state is Recording|Finalizing -> engine.toggle(Instant::now())   // never swallow a stop; stale API will fail into Error
+      else -> discovery::load; on Err send Update::Error (state snapshot None) with spec §10 wording for Missing
+              ("TypeWhisper API unavailable — enable API Server in Settings → Advanced"); on Ok rebuild
+              Engine::new(HttpApi::from_discovery(&d, path)) and engine.toggle(Instant::now())
+    Command::Quit -> break (main thread exits the event loop)
+    timeout -> engine.tick(Instant::now()) if an engine exists
     send Update + state snapshot to main
   }
 ```
+
+Main-thread error notice rules: `Update::Error(m)` sets a sticky notice and renders the error tray state even when the worker sent no state snapshot; periodic state snapshots never override a sticky notice; the notice clears when the next hotkey press begins a new attempt. Quit is executed on the main thread via `event_loop.exit()`; the worker never calls `process::exit`.
 
 Discovery is re-read on every `Toggle` so port/token rotations are picked up. `HttpApi` additionally re-reads discovery and retries once on a 401 (Task 4). On discovery/API error the worker sends `Update::Error` while remaining in `Error` state (next toggle retries).
 
