@@ -36,11 +36,6 @@ struct WorkerEvent {
     state: Option<State>,
 }
 
-enum Notice {
-    NoSpeech,
-    Error(String),
-}
-
 pub fn run() -> Result<(), String> {
     let config_path = config::config_path().map_err(|e| e.to_string())?;
     let lock = acquire_single_instance_lock(&config_path)?;
@@ -66,6 +61,7 @@ pub fn run() -> Result<(), String> {
         journal_path: cfg.journal_path,
         config_path,
         notice: None,
+        no_speech: false,
         error: None,
         _lock: lock,
     };
@@ -99,9 +95,18 @@ fn acquire_single_instance_lock(config_path: &Path) -> Result<File, String> {
 }
 
 fn load_discovery_api() -> Result<HttpApi, String> {
-    let path = discovery::discovery_path().map_err(|e| e.to_string())?;
-    let discovery = discovery::load(&path).map_err(|e| e.to_string())?;
+    let path = discovery::discovery_path().map_err(|e| discovery_message(&e))?;
+    let discovery = discovery::load(&path).map_err(|e| discovery_message(&e))?;
     Ok(HttpApi::from_discovery(&discovery, path))
+}
+
+fn discovery_message(error: &discovery::DiscoveryError) -> String {
+    match error {
+        discovery::DiscoveryError::Missing(_) => {
+            "TypeWhisper API unavailable — enable API Server in Settings → Advanced".to_string()
+        }
+        other => other.to_string(),
+    }
 }
 
 fn spawn_worker(commands: Receiver<WorkerCommand>, events: Sender<WorkerEvent>) {
@@ -110,24 +115,24 @@ fn spawn_worker(commands: Receiver<WorkerCommand>, events: Sender<WorkerEvent>) 
         loop {
             match commands.recv_timeout(WORKER_TICK) {
                 Ok(WorkerCommand::Toggle) => {
-                    let api = match load_discovery_api() {
-                        Ok(api) => api,
-                        Err(message) => {
-                            let event = WorkerEvent {
-                                update: Update::Error(message),
-                                state: None,
-                            };
-                            if events.send(event).is_err() {
-                                break;
+                    let needs_new_api = matches!(
+                        engine.as_ref().map(Engine::state),
+                        None | Some(State::Idle | State::Error { .. })
+                    );
+                    if needs_new_api {
+                        match load_discovery_api() {
+                            Ok(api) => engine = Some(Engine::new(api)),
+                            Err(message) => {
+                                let event = WorkerEvent {
+                                    update: Update::Error(message),
+                                    state: None,
+                                };
+                                if events.send(event).is_err() {
+                                    break;
+                                }
+                                continue;
                             }
-                            continue;
                         }
-                    };
-                    let rebuild = engine.as_ref().is_none_or(|engine| {
-                        matches!(engine.state(), State::Idle | State::Error { .. })
-                    });
-                    if rebuild {
-                        engine = Some(Engine::new(api));
                     }
                     let Some(engine) = engine.as_mut() else {
                         continue;
@@ -138,7 +143,7 @@ fn spawn_worker(commands: Receiver<WorkerCommand>, events: Sender<WorkerEvent>) 
                         break;
                     }
                 }
-                Ok(WorkerCommand::Quit) => std::process::exit(0),
+                Ok(WorkerCommand::Quit) => break,
                 Err(RecvTimeoutError::Timeout) => {
                     if let Some(engine) = engine.as_mut() {
                         let update = engine.tick(Instant::now());
@@ -183,7 +188,8 @@ struct App {
     events: Receiver<WorkerEvent>,
     journal_path: PathBuf,
     config_path: PathBuf,
-    notice: Option<Notice>,
+    notice: Option<String>,
+    no_speech: bool,
     error: Option<String>,
     _lock: File,
 }
@@ -202,12 +208,14 @@ impl App {
                 .as_ref()
                 .is_some_and(|handle| event.id == handle.hotkey.id());
             if matches_hotkey && event.state == HotKeyState::Pressed {
+                self.notice = None;
+                self.no_speech = false;
                 let _ = self.commands.send(WorkerCommand::Toggle);
             }
         }
     }
 
-    fn drain_menu(&mut self) {
+    fn drain_menu(&mut self, event_loop: &ActiveEventLoop) {
         for event in MenuEvent::receiver().try_iter() {
             if event.id() == tray::MENU_ID_OPEN_JOURNAL {
                 if let Err(e) = tray::open_path(&self.journal_path) {
@@ -219,6 +227,7 @@ impl App {
                 }
             } else if event.id() == tray::MENU_ID_QUIT {
                 let _ = self.commands.send(WorkerCommand::Quit);
+                event_loop.exit();
             }
         }
     }
@@ -240,40 +249,42 @@ impl App {
         match event.update {
             Update::Transcribed { text, .. } => match text {
                 Some(text) if !text.trim().is_empty() => self.append_transcript(&text),
-                _ => self.notice = Some(Notice::NoSpeech),
+                _ => self.no_speech = true,
             },
-            Update::Error(message) => self.notice = Some(Notice::Error(message)),
+            Update::Error(message) => self.notice = Some(message),
             Update::None => {}
         }
 
-        if let Some(state) = event.state {
-            if matches!(state, State::Recording { .. } | State::Finalizing { .. }) {
-                self.notice = None;
-            }
+        if event.state.is_some() || self.notice.is_some() || self.no_speech {
+            let snapshot = event.state.as_ref().map(tray::TrayState::from_engine);
             if let Some(tray) = &self.tray {
-                tray.set_state(&self.tray_state(&state));
+                tray.set_state(&self.tray_state(snapshot.as_ref()));
             }
         }
     }
 
     fn append_transcript(&mut self, text: &str) {
         match journal::append_entry(&self.journal_path, text, Local::now()) {
-            Ok(()) => self.notice = None,
+            Ok(()) => {
+                self.notice = None;
+                self.no_speech = false;
+            }
             Err(e) => {
                 copy_to_clipboard(text);
-                self.notice = Some(Notice::Error(format!(
+                self.notice = Some(format!(
                     "journal write failed; transcript copied to clipboard: {e}"
-                )));
+                ));
+                self.no_speech = false;
             }
         }
     }
 
-    fn tray_state(&self, state: &State) -> tray::TrayState {
-        match &self.notice {
-            Some(Notice::Error(message)) => tray::TrayState::Error(message.clone()),
-            Some(Notice::NoSpeech) if matches!(state, State::Idle) => tray::TrayState::NoSpeech,
-            _ => tray::TrayState::from_engine(state),
+    fn tray_state(&self, snapshot: Option<&tray::TrayState>) -> tray::TrayState {
+        let rendered = tray::render(self.notice.as_deref(), snapshot);
+        if self.no_speech && rendered == tray::TrayState::Idle {
+            return tray::TrayState::NoSpeech;
         }
+        rendered
     }
 }
 
@@ -310,7 +321,7 @@ impl ApplicationHandler for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.drain_hotkeys();
-        self.drain_menu();
+        self.drain_menu(event_loop);
         for _ in TrayIconEvent::receiver().try_iter() {}
         self.drain_worker();
         event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + UI_TICK));

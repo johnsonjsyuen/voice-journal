@@ -1,6 +1,7 @@
 //! Menu-bar tray icon, menu, and programmatically rendered icon states.
 
 use crate::engine::State;
+use std::cell::RefCell;
 use std::path::Path;
 use tray_icon::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tray_icon::{BadIcon, Icon, TrayIcon, TrayIconBuilder};
@@ -66,6 +67,13 @@ pub fn tooltip_text(state: &TrayState) -> String {
     }
 }
 
+pub fn render(notice: Option<&str>, state: Option<&TrayState>) -> TrayState {
+    if let Some(message) = notice {
+        return TrayState::Error(message.to_string());
+    }
+    state.cloned().unwrap_or(TrayState::Idle)
+}
+
 pub fn rgba_icon(state: &TrayState, size: u32) -> Vec<u8> {
     let color = match state {
         TrayState::Idle | TrayState::NoSpeech => [0, 0, 0],
@@ -90,15 +98,22 @@ pub fn icon(state: &TrayState, size: u32) -> Result<Icon, BadIcon> {
 }
 
 pub fn open_path(path: &Path) -> std::io::Result<()> {
-    std::process::Command::new("/usr/bin/open")
+    let status = std::process::Command::new("/usr/bin/open")
         .arg(path)
-        .spawn()
-        .map(|_| ())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "/usr/bin/open failed: {status}"
+        )))
+    }
 }
 
 pub struct Tray {
     icon: TrayIcon,
     status_item: MenuItem,
+    last_state: RefCell<Option<TrayState>>,
 }
 
 impl Tray {
@@ -127,10 +142,14 @@ impl Tray {
         Ok(Self {
             icon: tray_icon,
             status_item,
+            last_state: RefCell::new(None),
         })
     }
 
     pub fn set_state(&self, state: &TrayState) {
+        if self.last_state.borrow().as_ref() == Some(state) {
+            return;
+        }
         match icon(state, ICON_SIZE) {
             Ok(icon) => {
                 if let Err(e) = self
@@ -146,6 +165,7 @@ impl Tray {
             log::error!("failed to update tray tooltip: {e}");
         }
         self.status_item.set_text(status_text(state));
+        *self.last_state.borrow_mut() = Some(state.clone());
     }
 }
 
@@ -230,6 +250,18 @@ mod tests {
         assert_eq!(status_text(&TrayState::Recording), "Status: Recording");
         assert_eq!(status_text(&TrayState::Finalizing), "Status: Finalizing");
         assert!(status_text(&TrayState::Error("boom".into())).contains("boom"));
+    }
+
+    #[test]
+    fn sticky_notice_wins_over_state() {
+        let recording = TrayState::Recording;
+        assert_eq!(render(Some("boom"), None), TrayState::Error("boom".into()));
+        assert_eq!(
+            render(Some("boom"), Some(&recording)),
+            TrayState::Error("boom".into())
+        );
+        assert_eq!(render(None, Some(&recording)), TrayState::Recording);
+        assert_eq!(render(None, None), TrayState::Idle);
     }
 
     #[test]
