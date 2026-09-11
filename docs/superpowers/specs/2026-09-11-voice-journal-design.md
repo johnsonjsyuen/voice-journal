@@ -181,7 +181,7 @@ entry:
 | Case | Behavior |
 |---|---|
 | Discovery file missing (app not running / API off) | Tray error: "TypeWhisper API unavailable — enable API Server in Settings → Advanced". Auto-retry on next toggle. |
-| `409 Already recording` / `Not recording` / `finalizing` | Transient tray error, state returns to Idle. |
+| `409 Already recording` / `Not recording` / `finalizing` | Transient tray error; engine stays in Error until the next toggle retries. |
 | `401` | Re-read discovery once (token rotation), retry the request once, then error. |
 | TypeWhisper quits mid-recording | Poll fails; error state includes last known `output_file`. |
 | Transcription `failed` | Error state with provider error text; `output_file` logged. |

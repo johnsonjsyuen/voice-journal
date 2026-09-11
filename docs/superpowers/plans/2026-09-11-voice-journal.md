@@ -628,7 +628,7 @@ impl<A: Api> Engine<A> {
 Behavior:
 - `toggle` from `Idle | Error`: `api.start()`; Recording response → `Recording{id, started: now}`; error → `Error`.
 - `toggle` from `Recording`: `api.stop()`; success → `Finalizing{id: stopped id, deadline: now + max(120s, 3×elapsed), output_file: None}`; error → `Error`.
-- `toggle` while `Finalizing` → `Update::None` (ignored).
+- `toggle` while `Finalizing` → `Update::Error("transcription still in progress")`, state stays `Finalizing`, no API call (spec §7 transient feedback).
 - `tick` when not `Finalizing` → `None`; when `Finalizing`: past deadline → `log::warn!` last-known `output_file` (if any) then `Error("timed out...")`; session `Completed` → `Idle`, `Transcribed{text, output_file}`; `Failed` → `log::warn!` the session `output_file` (spec §10: a recording is never lost silently) then `Error(error or "transcription failed")`; `Recording | Finalizing` status → remember `output_file` in state, return `None`; API error → `Error`.
 - `Error` state is sticky only until next `toggle`, which retries from scratch.
 
@@ -640,7 +640,7 @@ Behavior:
 | `start_error_enters_error_and_next_toggle_retries` | start Err → Error; next toggle calls start again |
 | `failed_session_surfaces_provider_error` | tick → `Update::Error("finalTranscription: boom")` |
 | `timeout_produces_error` | tick at `deadline + 1s` → Error containing "timed out" |
-| `toggle_during_finalizing_is_ignored` | no extra API calls |
+| `toggle_during_finalizing_is_ignored` | returns `Update::Error` containing "still in progress", state remains `Finalizing`, no extra API calls |
 | `empty_text_is_transcribed_with_none_text` | Transcribed `text: None` (caller skips journal) |
 | `deadline_is_at_least_120s` | stop at now; tick just before 120s → None (still polling) |
 | `deadline_scales_with_long_recording` | start at t0, stop at t0+100s; deadline = stop + 3×100s = t0+400s; tick at t0+399s → None, tick at t0+401s → Error (proves 3×recorded-duration binds) |
@@ -681,7 +681,7 @@ On macOS additionally attempt `global_hotkey::hotkey::HotKey::from_str(&cfg.hotk
 
 ```rust
 fn main() {
-    env_logger::init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
     match std::env::args().nth(1).as_deref() {
         Some("--check") => std::process::exit(check::run_cli()),
         Some("--version") | Some("-V") => { println!("voice-journal {}", env!("CARGO_PKG_VERSION")); }
@@ -759,7 +759,8 @@ main thread (winit ApplicationHandler):
   build tray
   spawn worker thread owning Engine<HttpApi> and an mpsc::Receiver<Command>
   about_to_wait():
-    drain HotKeyEvent::receiver() -> on Pressed send Command::Toggle
+    drain worker updates FIRST (so a queued error is rendered before a hotkey press clears it)
+    drain HotKeyEvent::receiver() -> on Pressed clear notice, send Command::Toggle
     drain tray/menu receivers -> menu actions, Command::Toggle, Command::Quit
     drain mpsc::Receiver<Update>:
       Update::Transcribed { text: Some(t) } if !t.trim().is_empty() ->
@@ -778,7 +779,9 @@ worker thread:
       else -> discovery::load; on Err send Update::Error (state snapshot None) with spec §10 wording for Missing
               ("TypeWhisper API unavailable — enable API Server in Settings → Advanced"); on Ok rebuild
               Engine::new(HttpApi::from_discovery(&d, path)) and engine.toggle(Instant::now())
-    Command::Quit -> break (main thread exits the event loop)
+    Command::Quit -> if engine state is Recording, best-effort engine.toggle(Instant::now()) to POST stop
+                    (ignore result, so TypeWhisper finalizes instead of leaving the mic hot); then break
+                    (main thread exits the event loop)
     timeout -> engine.tick(Instant::now()) if an engine exists
     send Update + state snapshot to main
   }
