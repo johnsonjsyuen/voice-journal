@@ -146,7 +146,12 @@ impl<A: Api> Engine<A> {
                     Update::None
                 }
             },
-            Err(e) => self.fail(e),
+            Err(e) => {
+                if let Some(output_file) = last_output_file.as_deref() {
+                    log::warn!("TypeWhisper poll failed: {e} (output_file: {output_file})");
+                }
+                self.fail(e)
+            }
         }
     }
 
@@ -497,15 +502,22 @@ mod tests {
     #[test]
     fn session_api_error_enters_error() {
         let t0 = Instant::now();
+        let mut polled = finalizing("a");
+        polled.output_file = Some("/tmp/r.wav".into());
         let api = MockApi::new()
             .start(Ok(recording("a")))
             .stop(Ok(finalizing("a")))
+            .session(Ok(polled))
             .session(Err(ApiError::Unavailable("connection refused".into())));
         let mut engine = Engine::new(api);
         engine.toggle(t0);
         engine.toggle(t0);
 
-        match engine.tick(t0 + Duration::from_secs(1)) {
+        assert!(matches!(
+            engine.tick(t0 + Duration::from_secs(1)),
+            Update::None
+        ));
+        match engine.tick(t0 + Duration::from_secs(2)) {
             Update::Error(message) => assert!(message.contains("connection refused")),
             other => panic!("expected Error, got {other:?}"),
         }
