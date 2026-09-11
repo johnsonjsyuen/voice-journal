@@ -828,7 +828,11 @@ cat > "$PLIST" <<PLIST_EOF
   <key>ProgramArguments</key>
   <array><string>$BIN</string></array>
   <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
   <key>StandardOutPath</key><string>$HOME/Library/Logs/voice-journal.log</string>
   <key>StandardErrorPath</key><string>$HOME/Library/Logs/voice-journal.log</string>
 </dict>
