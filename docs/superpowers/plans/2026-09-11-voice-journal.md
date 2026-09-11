@@ -160,6 +160,24 @@ mod tests {
         append_entry(&path, "hi", ts()).unwrap();
         assert!(path.exists());
     }
+
+    #[test]
+    fn writes_header_into_empty_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.md");
+        std::fs::write(&path, "").unwrap();
+        append_entry(&path, "first", ts()).unwrap();
+        let got = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(got, "# Voice Journal\n\n- 2026-09-11 14:32 — first\n");
+    }
+
+    #[test]
+    fn unwritable_path_returns_io_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("adir");
+        std::fs::create_dir(&path).unwrap();
+        assert!(matches!(append_entry(&path, "hi", ts()), Err(JournalError::Io(_))));
+    }
 }
 ```
 
@@ -198,21 +216,22 @@ pub fn append_entry(path: &Path, text: &str, now: DateTime<Local>) -> Result<(),
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let exists = path.exists();
-    let needs_leading_newline = if exists {
-        use std::io::Read;
-        let mut f = std::fs::File::open(path)?;
-        let mut buf = Vec::new();
-        f.read_to_end(&mut buf)?;
-        !buf.is_empty() && !buf.ends_with(b"\n")
-    } else {
-        false
-    };
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    if !exists {
+    let mut file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .append(true)
+        .open(path)?;
+    let len = file.metadata()?.len();
+    if len == 0 {
         file.write_all(HEADER.as_bytes())?;
-    } else if needs_leading_newline {
-        file.write_all(b"\n")?;
+    } else {
+        use std::io::{Read, Seek, SeekFrom};
+        file.seek(SeekFrom::End(-1))?;
+        let mut last = [0u8; 1];
+        file.read_exact(&mut last)?;
+        if last[0] != b'\n' {
+            file.write_all(b"\n")?;
+        }
     }
     file.write_all(format_entry(text, now).as_bytes())?;
     file.flush()?;
@@ -295,12 +314,21 @@ journal_path = "/tmp/j.md""#).unwrap();
     }
 
     #[test]
-    fn env_override_changes_config_path() {
+    fn explicit_config_path_overrides_default() {
+        let path = config_path_from(Some("/tmp/custom.toml")).unwrap();
+        assert_eq!(path, std::path::PathBuf::from("/tmp/custom.toml"));
+        let default_like = config_path_from(Some("")).unwrap();
+        assert!(default_like.ends_with("voice-journal/config.toml"));
+    }
+
+    #[test]
+    fn created_config_round_trips_with_expanded_path() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("custom.toml");
-        std::env::set_var("VOICE_JOURNAL_CONFIG", &path);
-        assert_eq!(config_path().unwrap(), path);
-        std::env::remove_var("VOICE_JOURNAL_CONFIG");
+        let path = dir.path().join("config.toml");
+        let created = load_or_create(&path).unwrap();
+        let loaded = load(&path).unwrap();
+        assert_eq!(created, loaded);
+        assert!(!loaded.journal_path.to_string_lossy().starts_with('~'));
     }
 }
 ```
@@ -320,8 +348,10 @@ pub struct Config {
     pub journal_path: PathBuf,
 }
 
+const DEFAULT_JOURNAL_PATH: &str = "~/Documents/VoiceJournal.md";
+
 fn default_hotkey() -> String { "Ctrl+Alt+KeyJ".into() }
-fn default_journal_path() -> PathBuf { expand_tilde("~/Documents/VoiceJournal.md") }
+fn default_journal_path() -> PathBuf { expand_tilde(DEFAULT_JOURNAL_PATH) }
 
 impl Default for Config {
     fn default() -> Self { Config { hotkey: default_hotkey(), journal_path: default_journal_path() } }
@@ -339,15 +369,24 @@ pub enum ConfigError {
     NoHome,
 }
 
-pub fn config_path() -> Result<PathBuf, ConfigError> {
-    if let Ok(p) = std::env::var("VOICE_JOURNAL_CONFIG") {
+pub fn config_path_from(env_value: Option<&str>) -> Result<PathBuf, ConfigError> {
+    if let Some(p) = env_value.filter(|v| !v.is_empty()) {
         return Ok(PathBuf::from(p));
     }
     let dir = dirs::config_dir().ok_or(ConfigError::NoHome)?.join("voice-journal");
     Ok(dir.join("config.toml"))
 }
 
+pub fn config_path() -> Result<PathBuf, ConfigError> {
+    config_path_from(std::env::var("VOICE_JOURNAL_CONFIG").ok().as_deref())
+}
+
 pub fn expand_tilde(input: &str) -> PathBuf {
+    if input == "~" {
+        if let Some(home) = dirs::home_dir() {
+            return home;
+        }
+    }
     if let Some(rest) = input.strip_prefix("~/") {
         if let Some(home) = dirs::home_dir() {
             return home.join(rest);
@@ -357,8 +396,11 @@ pub fn expand_tilde(input: &str) -> PathBuf {
 }
 
 pub fn parse(s: &str) -> Result<Config, ConfigError> {
-    let c: Config = toml::from_str(s)?;
-    if c.hotkey.trim().is_empty() { return Err(ConfigError::EmptyHotkey); }
+    let mut c: Config = toml::from_str(s)?;
+    if c.hotkey.trim().is_empty() {
+        return Err(ConfigError::EmptyHotkey);
+    }
+    c.journal_path = expand_tilde(&c.journal_path.to_string_lossy());
     Ok(c)
 }
 
@@ -369,8 +411,8 @@ pub fn load_or_create(path: &Path) -> Result<Config, ConfigError> {
     let default = Config::default();
     if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
     let body = format!(
-        "# Global toggle hotkey (global-hotkey key syntax).\nhotkey = \"{}\"\n\n# Journal destination. ~ is expanded.\njournal_path = \"~/Documents/VoiceJournal.md\"\n",
-        default.hotkey
+        "# Global toggle hotkey (global-hotkey key syntax).\nhotkey = \"{}\"\n\n# Journal destination. ~ is expanded.\njournal_path = \"{}\"\n",
+        default.hotkey, DEFAULT_JOURNAL_PATH
     );
     std::fs::write(path, body)?;
     Ok(default)
@@ -482,9 +524,9 @@ pub fn load(path: &Path) -> Result<Discovery, DiscoveryError> {
 
 ```rust
 pub trait Api: Send + Sync {
-    fn start(&self) -> Result<RecorderSession, ApiError>;
-    fn stop(&self) -> Result<RecorderSession, ApiError>;
-    fn session(&self, id: &str) -> Result<RecorderSession, ApiError>;
+    fn start(&mut self) -> Result<RecorderSession, ApiError>;
+    fn stop(&mut self) -> Result<RecorderSession, ApiError>;
+    fn session(&mut self, id: &str) -> Result<RecorderSession, ApiError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -507,16 +549,18 @@ pub enum SessionStatus { Recording, Finalizing, Completed, Failed }
 pub enum ApiError {
     #[error("TypeWhisper API unavailable: {0}")]
     Unavailable(String),
+    #[error("TypeWhisper API token rejected (401)")]
+    Unauthorized,
     #[error("TypeWhisper HTTP {status}: {message}")]
     Http { status: u16, message: String },
     #[error("invalid TypeWhisper response: {0}")]
     InvalidResponse(String),
 }
 
-pub struct HttpApi { agent: ureq::Agent, base: String, token: Option<String> }
+pub struct HttpApi { agent: ureq::Agent, base: String, token: Option<String>, discovery_path: Option<PathBuf> }
 impl HttpApi {
-    pub fn new(port: u16, token: Option<String>) -> Self;
-    pub fn from_discovery(d: &Discovery) -> Self;
+    pub fn new(port: u16, token: Option<String>) -> Self;                 // discovery_path: None
+    pub fn from_discovery(d: &Discovery, path: PathBuf) -> Self;
 }
 ```
 
@@ -526,8 +570,8 @@ Behavior:
 - `session`: `GET {base}/v1/recorder/session?id={id}`.
 - Always send `Authorization: Bearer <token>` when token is `Some`.
 - Timeouts: connect 1 s, overall 5 s (`ureq::AgentBuilder`).
-- Map `ureq::Error::Status(code, resp)` to `ApiError::Http` with the body's `error.message` if parseable, else the raw status text; transport errors to `Unavailable`.
-- Non-2xx from `call()` arrives as `Error::Status`; success codes 200 only.
+- Map `ureq::Error::Status(code, resp)` to `ApiError::Http` with the body's `error.message` if parseable, else the raw status text; transport errors to `Unavailable`; status 401 to `Unauthorized`.
+- **401 recovery (spec §10):** every request goes through a private `call` helper. On `ApiError::Unauthorized` with a `discovery_path` present, re-read the discovery file, replace `base`/`token`, and retry the request exactly once; a second 401 returns `Unauthorized`.
 
 - [ ] **Step 2: Required tests** (in `src/api.rs` `#[cfg(test)]` using `httpmock`)
 
@@ -539,6 +583,9 @@ Behavior:
 | `session_parses_failed` | → `{"id":"a","status":"failed","error":"finalTranscription: boom"}` | status Failed, error text preserved |
 | `auth_header_sent_when_token_present` | any route, assert header `Authorization == Bearer tok` | header matches |
 | `status_409_maps_to_http_error` | `{"error":{"code":"bad_request","message":"Already recording"}}`, status 409 | `ApiError::Http { status: 409, message }` contains "Already recording" |
+| `status_401_maps_to_unauthorized` | status 401, any body, no discovery file | `ApiError::Unauthorized` |
+| `unauthorized_reloads_discovery_and_retries_once` | temp discovery file; first request 401, second 200 with corrected token | success on retry; second request carries the new token |
+| `persistent_unauthorized_stops_after_one_retry` | temp discovery file; both requests 401 | `ApiError::Unauthorized`; exactly 2 requests made |
 | `connection_refused_is_unavailable` | port 1 (no listener) | `ApiError::Unavailable` |
 
 - [ ] **Step 3: Run** `cargo test api` → pass.
@@ -664,6 +711,20 @@ pub mod platform;
 
 **Spike requirement:** this task is the design's spike #1/#2. First commit a minimal `hotkey.rs` + event loop that only logs events, run CI; then add tray and worker wiring.
 
+- [ ] **Step 0: dependency + single-instance lock**
+
+Run: `cargo add --target 'cfg(target_os = "macos")' fs4` (flock; version pinned by cargo add).
+
+At daemon startup, before registering the hotkey or building the tray:
+
+```rust
+let dir = config::config_path()?.parent().unwrap().to_path_buf();
+std::fs::create_dir_all(&dir)?;
+let lock_file = std::fs::OpenOptions::new().create(true).read(true).write(true).open(dir.join("adapter.lock"))?;
+fs4::fs_std::FileExt::try_lock_exclusive(&lock_file).map_err(|_| "voice-journal is already running")?;
+// keep `lock_file` alive for the process lifetime
+```
+
 - [ ] **Step 1: `hotkey.rs`**
 
 ```rust
@@ -687,6 +748,7 @@ pub fn parse(spec: &str) -> Result<HotKey, String>; // wraps FromStr with a help
 
 ```
 main thread (winit ApplicationHandler):
+  acquire single-instance flock (Step 0)
   create GlobalHotKeyManager + register configured hotkey
   build tray
   spawn worker thread owning Engine<HttpApi> and an mpsc::Receiver<Command>
@@ -694,21 +756,26 @@ main thread (winit ApplicationHandler):
     drain HotKeyEvent::receiver() -> on Pressed send Command::Toggle
     drain tray/menu receivers -> menu actions, Command::Toggle, Command::Quit
     drain mpsc::Receiver<Update>:
-      Update::Transcribed { text: Some(t) } if !t.trim().is_empty() -> journal::append_entry
+      Update::Transcribed { text: Some(t) } if !t.trim().is_empty() ->
+        match journal::append_entry(journal_path, &t, Local::now()):
+          Ok(())  -> tray idle
+          Err(e)  -> transcript copied to clipboard via `pbcopy` (stdin) so speech is not lost,
+                     tray error "journal write failed; transcript copied to clipboard: {e}"
       Update::Transcribed { text: None|empty } -> tray tooltip "No speech detected"
       Update::Error(m) -> tray error state
     update tray from engine state snapshot sent by worker
     event_loop.set_control_flow(ControlFlow::WaitUntil(now + 100ms))
 worker thread:
   loop { recv_timeout(250ms):
-    Command::Toggle -> api = HttpApi::from_discovery(discovery::load(...)?); engine.toggle(Instant::now())
+    Command::Toggle -> if no api yet { api = HttpApi::from_discovery(discovery::load(path)?, path) };
+                       engine.toggle(Instant::now())
     Command::Quit -> std::process::exit(0)
     timeout -> engine.tick(Instant::now())
     send Update + state snapshot to main
   }
 ```
 
-Discovery is re-read on every `Toggle` so port/token rotations are picked up. On discovery/API error the worker sends `Update::Error` and remains in `Error` state (next toggle retries).
+Discovery is re-read on every `Toggle` so port/token rotations are picked up. `HttpApi` additionally re-reads discovery and retries once on a 401 (Task 4). On discovery/API error the worker sends `Update::Error` while remaining in `Error` state (next toggle retries).
 
 - [ ] **Step 4: Platform gating test**: `cargo build` on Linux must not compile `platform/macos`; `cargo build` on macOS CI must succeed.
 - [ ] **Step 5: Commit**: `git commit -am "feat: macOS hotkey, tray, and worker wiring"`
