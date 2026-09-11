@@ -10,3 +10,5 @@ pub mod config;
 pub mod discovery;
 pub mod engine;
 pub mod journal;
+#[cfg(target_os = "macos")]
+pub mod platform;
