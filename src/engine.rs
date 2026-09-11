@@ -81,7 +81,7 @@ impl<A: Api> Engine<A> {
                     Err(e) => self.fail(e),
                 }
             }
-            State::Finalizing { .. } => Update::None,
+            State::Finalizing { .. } => Update::Error("transcription still in progress".into()),
             State::Idle | State::Error { .. } => match self.api.start() {
                 Ok(session) if session.status == SessionStatus::Recording => {
                     self.state = State::Recording {
@@ -402,10 +402,13 @@ mod tests {
             engine.api.stop_calls,
             engine.api.session_calls,
         );
-        assert!(matches!(
-            engine.toggle(t0 + Duration::from_secs(5)),
-            Update::None
-        ));
+        match engine.toggle(t0 + Duration::from_secs(5)) {
+            Update::Error(message) => assert!(
+                message.contains("still in progress"),
+                "message was {message:?}"
+            ),
+            other => panic!("expected Error, got {other:?}"),
+        }
         assert_eq!(
             (
                 engine.api.start_calls,

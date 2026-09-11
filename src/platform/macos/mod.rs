@@ -143,7 +143,14 @@ fn spawn_worker(commands: Receiver<WorkerCommand>, events: Sender<WorkerEvent>) 
                         break;
                     }
                 }
-                Ok(WorkerCommand::Quit) => break,
+                Ok(WorkerCommand::Quit) => {
+                    if let Some(engine) = engine.as_mut()
+                        && matches!(engine.state(), State::Recording { .. })
+                    {
+                        let _ = engine.toggle(Instant::now());
+                    }
+                    break;
+                }
                 Err(RecvTimeoutError::Timeout) => {
                     if let Some(engine) = engine.as_mut() {
                         let update = engine.tick(Instant::now());
@@ -320,10 +327,10 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.drain_worker();
         self.drain_hotkeys();
         self.drain_menu(event_loop);
         for _ in TrayIconEvent::receiver().try_iter() {}
-        self.drain_worker();
         event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + UI_TICK));
     }
 }

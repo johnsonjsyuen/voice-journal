@@ -1,7 +1,7 @@
 const USAGE: &str = "Usage: voice-journal [--check | --version | --help]\n\n  (no args)  run the macOS menu-bar daemon\n  --check    validate config, journal path, and TypeWhisper discovery\n  --version  print version\n  --help     print this help\n";
 
 fn main() {
-    env_logger::init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
     match std::env::args().nth(1).as_deref() {
         Some("--check") => std::process::exit(voice_journal::check::run_cli()),
         Some("--version") | Some("-V") => {
