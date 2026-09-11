@@ -585,7 +585,8 @@ Behavior:
 | `status_409_maps_to_http_error` | `{"error":{"code":"bad_request","message":"Already recording"}}`, status 409 | `ApiError::Http { status: 409, message }` contains "Already recording" |
 | `status_401_maps_to_unauthorized` | status 401, any body, no discovery file | `ApiError::Unauthorized` |
 | `unauthorized_reloads_discovery_and_retries_once` | temp discovery file; first request 401, second 200 with corrected token | success on retry; second request carries the new token |
-| `persistent_unauthorized_stops_after_one_retry` | temp discovery file; both requests 401 | `ApiError::Unauthorized`; exactly 2 requests made |
+| `persistent_unauthorized_stops_after_one_retry` | temp discovery file; both requests 401 | `ApiError::Unauthorized`; exactly 2 requests made, second carrying `Bearer new` |
+| `invalid_json_response_is_invalid_response` | 200 with non-JSON body | `ApiError::InvalidResponse` |
 | `connection_refused_is_unavailable` | port 1 (no listener) | `ApiError::Unavailable` |
 
 - [ ] **Step 3: Run** `cargo test api` → pass.
@@ -603,7 +604,7 @@ Behavior:
 pub enum State {
     Idle,
     Recording { id: String, started: Instant },
-    Finalizing { id: String, deadline: Instant },
+    Finalizing { id: String, deadline: Instant, output_file: Option<String> },
     Error { message: String },
 }
 
@@ -626,9 +627,9 @@ impl<A: Api> Engine<A> {
 
 Behavior:
 - `toggle` from `Idle | Error`: `api.start()`; Recording response → `Recording{id, started: now}`; error → `Error`.
-- `toggle` from `Recording`: `api.stop()`; success → `Finalizing{id: stopped id, deadline: now + max(120s, 3×elapsed)}`; error → `Error`.
+- `toggle` from `Recording`: `api.stop()`; success → `Finalizing{id: stopped id, deadline: now + max(120s, 3×elapsed), output_file: None}`; error → `Error`.
 - `toggle` while `Finalizing` → `Update::None` (ignored).
-- `tick` when not `Finalizing` → `None`; when `Finalizing`: past deadline → `Error("timed out...")`; session `Completed` → `Idle`, `Transcribed{text, output_file}`; `Failed` → `Error(error or "transcription failed")`; `Recording | Finalizing` status → `None`; API error → `Error`.
+- `tick` when not `Finalizing` → `None`; when `Finalizing`: past deadline → `log::warn!` last-known `output_file` (if any) then `Error("timed out...")`; session `Completed` → `Idle`, `Transcribed{text, output_file}`; `Failed` → `log::warn!` the session `output_file` (spec §10: a recording is never lost silently) then `Error(error or "transcription failed")`; `Recording | Finalizing` status → remember `output_file` in state, return `None`; API error → `Error`.
 - `Error` state is sticky only until next `toggle`, which retries from scratch.
 
 - [ ] **Step 2: Required unit tests** with a `MockApi` (`RefCell<VecDeque<Result<RecorderSession, ApiError>>>`):
@@ -642,6 +643,10 @@ Behavior:
 | `toggle_during_finalizing_is_ignored` | no extra API calls |
 | `empty_text_is_transcribed_with_none_text` | Transcribed `text: None` (caller skips journal) |
 | `deadline_is_at_least_120s` | stop at now; tick just before 120s → None (still polling) |
+| `deadline_scales_with_long_recording` | start at t0, stop at t0+100s; deadline = stop + 3×100s = t0+400s; tick at t0+399s → None, tick at t0+401s → Error (proves 3×recorded-duration binds) |
+| `stop_error_enters_error` | `api.stop()` Err → `Update::Error` and state Error |
+| `session_api_error_enters_error` | `api.session()` Err during Finalizing → `Update::Error` |
+| `non_recording_start_response_enters_error` | start returns `Completed` → Error "unexpected start status" |
 
 - [ ] **Step 3: Integration test `tests/recorder_flow.rs`**
 
