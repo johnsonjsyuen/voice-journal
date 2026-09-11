@@ -351,7 +351,9 @@ mod tests {
                 .body(r#"{"error":{"message":"token expired"}}"#);
         });
         let second = server.mock(|when, then| {
-            when.method(POST).path("/v1/recorder/start");
+            when.method(POST)
+                .path("/v1/recorder/start")
+                .header("Authorization", "Bearer new");
             then.status(401)
                 .body(r#"{"error":{"message":"token expired"}}"#);
         });
@@ -369,6 +371,21 @@ mod tests {
         assert!(matches!(err, ApiError::Unauthorized), "got {err:?}");
         first.assert_hits(1);
         second.assert_hits(1);
+    }
+
+    #[test]
+    fn invalid_json_response_is_invalid_response() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(POST).path("/v1/recorder/start");
+            then.status(200).body("not json");
+        });
+
+        let mut api = HttpApi::new(server.port(), None);
+        let err = api.start().unwrap_err();
+
+        assert!(matches!(err, ApiError::InvalidResponse(_)), "got {err:?}");
+        mock.assert_hits(1);
     }
 
     #[test]

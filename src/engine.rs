@@ -8,9 +8,18 @@ const MIN_TIMEOUT: Duration = Duration::from_secs(120);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum State {
     Idle,
-    Recording { id: String, started: Instant },
-    Finalizing { id: String, deadline: Instant },
-    Error { message: String },
+    Recording {
+        id: String,
+        started: Instant,
+    },
+    Finalizing {
+        id: String,
+        deadline: Instant,
+        output_file: Option<String>,
+    },
+    Error {
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,10 +69,11 @@ impl<A: Api> Engine<A> {
                 match self.api.stop() {
                     Ok(session) => {
                         let elapsed = now.checked_duration_since(started).unwrap_or_default();
-                        let timeout = MIN_TIMEOUT.max(elapsed.saturating_mul(3));
+                        let deadline = (started + elapsed.saturating_mul(3)).max(now + MIN_TIMEOUT);
                         self.state = State::Finalizing {
                             id: session.id,
-                            deadline: now + timeout,
+                            deadline,
+                            output_file: None,
                         };
                         self.last_error = None;
                         Update::None
@@ -91,11 +101,19 @@ impl<A: Api> Engine<A> {
     }
 
     pub fn tick(&mut self, now: Instant) -> Update {
-        let (id, deadline) = match &self.state {
-            State::Finalizing { id, deadline } => (id.clone(), *deadline),
+        let (id, deadline, last_output_file) = match &self.state {
+            State::Finalizing {
+                id,
+                deadline,
+                output_file,
+            } => (id.clone(), *deadline, output_file.clone()),
             _ => return Update::None,
         };
         if now >= deadline {
+            let output_file = last_output_file.as_deref().unwrap_or("<unknown>");
+            log::warn!(
+                "timed out waiting for TypeWhisper transcription (output_file: {output_file})"
+            );
             return self.fail_message("timed out waiting for transcription".into());
         }
         match self.api.session(&id) {
@@ -108,12 +126,25 @@ impl<A: Api> Engine<A> {
                         output_file: session.output_file,
                     }
                 }
-                SessionStatus::Failed => self.fail_message(
-                    session
+                SessionStatus::Failed => {
+                    let output_file = session.output_file.or(last_output_file);
+                    let message = session
                         .error
-                        .unwrap_or_else(|| "transcription failed".into()),
-                ),
-                SessionStatus::Recording | SessionStatus::Finalizing => Update::None,
+                        .unwrap_or_else(|| "transcription failed".into());
+                    let output_file = output_file.as_deref().unwrap_or("<unknown>");
+                    log::warn!(
+                        "TypeWhisper transcription failed: {message} (output_file: {output_file})"
+                    );
+                    self.fail_message(message)
+                }
+                SessionStatus::Recording | SessionStatus::Finalizing => {
+                    if let Some(path) = session.output_file
+                        && let State::Finalizing { output_file, .. } = &mut self.state
+                    {
+                        *output_file = Some(path);
+                    }
+                    Update::None
+                }
             },
             Err(e) => self.fail(e),
         }
@@ -256,8 +287,12 @@ mod tests {
 
         let stopped_at = t0 + Duration::from_secs(5);
         assert!(matches!(engine.toggle(stopped_at), Update::None));
-        assert!(matches!(engine.state(), State::Finalizing { id, deadline }
-                if id == "a" && *deadline == stopped_at + Duration::from_secs(120)));
+        assert!(
+            matches!(engine.state(), State::Finalizing { id, deadline, output_file }
+                if id == "a"
+                    && *deadline == stopped_at + Duration::from_secs(120)
+                    && output_file.is_none())
+        );
 
         assert!(matches!(
             engine.tick(stopped_at + Duration::from_secs(1)),
@@ -414,5 +449,102 @@ mod tests {
         ));
         assert!(matches!(engine.state(), State::Finalizing { .. }));
         assert_eq!(engine.last_error(), None);
+    }
+
+    #[test]
+    fn deadline_scales_with_long_recording() {
+        let t0 = Instant::now();
+        let api = MockApi::new()
+            .start(Ok(recording("a")))
+            .stop(Ok(finalizing("a")))
+            .session(Ok(finalizing("a")));
+        let mut engine = Engine::new(api);
+        engine.toggle(t0);
+        engine.toggle(t0 + Duration::from_secs(100));
+
+        assert!(matches!(engine.state(), State::Finalizing { deadline, .. }
+                if *deadline == t0 + Duration::from_secs(300)));
+
+        assert!(matches!(
+            engine.tick(t0 + Duration::from_secs(299)),
+            Update::None
+        ));
+        match engine.tick(t0 + Duration::from_secs(301)) {
+            Update::Error(message) => assert!(message.contains("timed out")),
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stop_error_enters_error() {
+        let t0 = Instant::now();
+        let api = MockApi::new()
+            .start(Ok(recording("a")))
+            .stop(Err(ApiError::Http {
+                status: 409,
+                message: "Not recording".into(),
+            }));
+        let mut engine = Engine::new(api);
+        engine.toggle(t0);
+
+        match engine.toggle(t0 + Duration::from_secs(1)) {
+            Update::Error(message) => assert!(message.contains("Not recording")),
+            other => panic!("expected Error, got {other:?}"),
+        }
+        assert!(matches!(engine.state(), State::Error { .. }));
+    }
+
+    #[test]
+    fn session_api_error_enters_error() {
+        let t0 = Instant::now();
+        let api = MockApi::new()
+            .start(Ok(recording("a")))
+            .stop(Ok(finalizing("a")))
+            .session(Err(ApiError::Unavailable("connection refused".into())));
+        let mut engine = Engine::new(api);
+        engine.toggle(t0);
+        engine.toggle(t0);
+
+        match engine.tick(t0 + Duration::from_secs(1)) {
+            Update::Error(message) => assert!(message.contains("connection refused")),
+            other => panic!("expected Error, got {other:?}"),
+        }
+        assert!(matches!(engine.state(), State::Error { .. }));
+    }
+
+    #[test]
+    fn non_recording_start_response_enters_error() {
+        let t0 = Instant::now();
+        let api = MockApi::new().start(Ok(completed("a", Some("stale"))));
+        let mut engine = Engine::new(api);
+
+        match engine.toggle(t0) {
+            Update::Error(message) => assert!(message.contains("unexpected start status")),
+            other => panic!("expected Error, got {other:?}"),
+        }
+        assert!(matches!(engine.state(), State::Error { .. }));
+    }
+
+    #[test]
+    fn interim_poll_remembers_output_file() {
+        let t0 = Instant::now();
+        let mut polled = finalizing("a");
+        polled.output_file = Some("/tmp/known.wav".into());
+        let api = MockApi::new()
+            .start(Ok(recording("a")))
+            .stop(Ok(finalizing("a")))
+            .session(Ok(polled));
+        let mut engine = Engine::new(api);
+        engine.toggle(t0);
+        engine.toggle(t0);
+
+        assert!(matches!(
+            engine.tick(t0 + Duration::from_secs(1)),
+            Update::None
+        ));
+        assert!(
+            matches!(engine.state(), State::Finalizing { output_file: Some(path), .. }
+                if path == "/tmp/known.wav")
+        );
     }
 }
