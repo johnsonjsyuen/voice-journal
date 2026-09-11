@@ -15,6 +15,7 @@ toml = "1.1.6"
 ureq = { version = "2", default-features = false, features = ["json"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+fs4 = "1.1.0"
 global-hotkey = "0.8"
 tray-icon = "0.21"
 winit = "0.30"
