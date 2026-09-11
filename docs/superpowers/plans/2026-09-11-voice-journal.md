@@ -665,12 +665,13 @@ Use `httpmock` to mock all three endpoints (start → finalizing → completed w
 
 ```rust
 pub struct Report { pub lines: Vec<String>, pub ok: bool }
-pub fn run(config_path: &Path) -> Report;
+pub fn run(config_path: &Path, discovery_path: &Path) -> Report;
+pub fn run_cli() -> i32; // resolves paths via config::config_path() and discovery::discovery_path(); prints lines; 0/1
 ```
 
 Checks, in order:
 1. Config loads (or is created) — fail → `ok = false`.
-2. Journal parent directory exists or is creatable and writable — fail → `ok = false`. Do not create the journal file.
+2. Journal parent directory exists or is creatable and writable — probe by `create_dir_all(parent)` then creating and deleting a `*.probe` file in it; fail → `ok = false`. Do not create the journal file itself.
 3. Journal path reported.
 4. Hotkey string non-empty — fail → `ok = false`.
 5. Discovery file: present → report port + token present/absent; missing → warning line, **does not** flip `ok`.
