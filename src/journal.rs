@@ -25,21 +25,22 @@ pub fn append_entry(path: &Path, text: &str, now: DateTime<Local>) -> Result<(),
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let exists = path.exists();
-    let needs_leading_newline = if exists {
-        use std::io::Read;
-        let mut f = std::fs::File::open(path)?;
-        let mut buf = Vec::new();
-        f.read_to_end(&mut buf)?;
-        !buf.is_empty() && !buf.ends_with(b"\n")
-    } else {
-        false
-    };
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    if !exists {
+    let mut file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .append(true)
+        .open(path)?;
+    let len = file.metadata()?.len();
+    if len == 0 {
         file.write_all(HEADER.as_bytes())?;
-    } else if needs_leading_newline {
-        file.write_all(b"\n")?;
+    } else {
+        use std::io::{Read, Seek, SeekFrom};
+        file.seek(SeekFrom::End(-1))?;
+        let mut last = [0u8; 1];
+        file.read_exact(&mut last)?;
+        if last[0] != b'\n' {
+            file.write_all(b"\n")?;
+        }
     }
     file.write_all(format_entry(text, now).as_bytes())?;
     file.flush()?;
@@ -119,5 +120,26 @@ mod tests {
         let path = dir.path().join("nested/deeper/journal.md");
         append_entry(&path, "hi", ts()).unwrap();
         assert!(path.exists());
+    }
+
+    #[test]
+    fn writes_header_into_empty_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.md");
+        std::fs::write(&path, "").unwrap();
+        append_entry(&path, "first", ts()).unwrap();
+        let got = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(got, "# Voice Journal\n\n- 2026-09-11 14:32 — first\n");
+    }
+
+    #[test]
+    fn unwritable_path_returns_io_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("adir");
+        std::fs::create_dir(&path).unwrap();
+        assert!(matches!(
+            append_entry(&path, "hi", ts()),
+            Err(JournalError::Io(_))
+        ));
     }
 }
