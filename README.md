@@ -20,6 +20,23 @@ microphone capture and Granite Speech transcription through its local API.
   - a Granite Speech model downloaded and selected for the Recorder
 - Rust (only to build from source)
 
+## Download
+
+Download `voice-journal-aarch64-apple-darwin.tar.gz` from
+[GitHub Releases](https://github.com/johnsonjsyuen/voice-journal/releases).
+Each successful build pushed to `main` publishes a release tagged with its commit
+SHA. You do not need Rust to use the download.
+
+Extract the archive into a permanent folder, then run:
+
+```bash
+tar -xzf voice-journal-aarch64-apple-darwin.tar.gz
+./voice-journal
+```
+
+To start the downloaded app at login, run `./install-launchd.sh ./voice-journal`
+from that folder. The binary is not signed or notarized.
+
 ## Build
 
 ```bash
