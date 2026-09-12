@@ -1,0 +1,73 @@
+VOICE JOURNAL - INSTALLATION AND USE
+
+Requirements
+------------
+- macOS 14 or later on an Apple Silicon Mac.
+- TypeWhisper 1.6 or later: https://www.typewhisper.com
+  Keep TypeWhisper running, enable Settings > Advanced > API Server, and
+  download and select a Granite Speech model for the Recorder.
+- No Rust compiler or build tools are needed for this download.
+
+Install
+-------
+1. Open voice-journal-aarch64-apple-darwin.dmg.
+2. Drag Voice Journal.app to the Applications shortcut.
+3. Eject the disk image.
+4. Open Voice Journal from Applications. Its icon appears in the menu bar;
+   there is no Dock icon.
+
+The app is ad-hoc signed. It is NOT Developer ID signed or notarized.
+If macOS blocks the first launch, and you trust the download, open
+System Settings > Privacy & Security and choose Open Anyway, then confirm.
+Apple's instructions: https://support.apple.com/en-gb/102445
+
+Record a note
+-------------
+Press Ctrl+Alt+J anywhere to start recording. Press it again to stop.
+The transcript is appended to ~/Documents/VoiceJournal.md.
+The menu bar icon is an outline circle when idle, a red circle while
+recording, and an orange square on error. Hover for error details.
+Use the menu to open the journal, open configuration, or quit.
+
+Configuration is created on first run at:
+~/Library/Application Support/voice-journal/config.toml
+Restart the app after changing the hotkey or journal destination.
+
+Start at login (optional)
+------------------------
+Open System Settings > General > Login Items (Login Items & Extensions on
+some macOS versions). Add /Applications/Voice Journal.app to Open at Login.
+
+Do not combine this with the launchd installer used by archive/source builds.
+If switching from that installer, remove the old service first by running
+this command in Terminal after installing the app:
+
+bash "/Applications/Voice Journal.app/Contents/Resources/install-launchd.sh" --uninstall
+
+Then add the app to Open at Login. Quit any old manually started copy too.
+
+Upgrade
+-------
+Quit Voice Journal from its menu bar menu. Open the new DMG, drag the new
+Voice Journal.app into Applications, choose Replace, eject the disk image,
+and launch the app again. The journal and configuration live outside the
+app and are retained when replacing it.
+
+Troubleshooting
+---------------
+If TypeWhisper's API is unavailable, check that TypeWhisper is running and
+its API Server is enabled. If no speech is detected, nothing is appended.
+Make sure the Granite Speech model has finished downloading and that your
+journal's folder is writable. If a journal write fails, the transcript is
+copied to the clipboard.
+
+For a diagnostic check, run this in Terminal:
+"/Applications/Voice Journal.app/Contents/MacOS/voice-journal" --check
+
+This app bundle includes a copy of these instructions and install-launchd.sh
+in Contents/Resources. The launchd script is provided for migration from
+archive/source installs; the optional Login Items setup above is sufficient
+for the DMG app.
+
+Releases: https://github.com/johnsonjsyuen/voice-journal/releases
+Source: https://github.com/johnsonjsyuen/voice-journal

@@ -22,11 +22,30 @@ microphone capture and Granite Speech transcription through its local API.
 
 ## Download
 
-Download `voice-journal-aarch64-apple-darwin.tar.gz` from
+Download `voice-journal-aarch64-apple-darwin.dmg` from
 [GitHub Releases](https://github.com/johnsonjsyuen/voice-journal/releases).
 Each successful build pushed to `main` publishes a release tagged with its commit
 SHA. You do not need Rust to use the download.
 
+1. Open the DMG and drag **Voice Journal.app** to **Applications**.
+2. Eject the disk image, then open **Voice Journal** from Applications.
+3. Look for the menu bar icon; the app has no Dock icon. Press **Ctrl+Alt+J** to
+   start recording and again to save the transcript.
+
+The app is ad-hoc signed, but is **not Developer ID signed or notarized**.
+If macOS blocks the first launch and you trust this download, open
+**System Settings → Privacy & Security → Open Anyway**, then confirm the launch.
+See [Apple's instructions](https://support.apple.com/en-gb/102445).
+The DMG also includes [INSTALL.txt](docs/INSTALL.txt) with installation and usage
+instructions.
+
+To upgrade, quit Voice Journal from its menu bar menu, then drag the new app into
+Applications and choose **Replace**. Your journal and configuration are stored
+outside the app.
+
+### Archive alternative
+
+The release also includes `voice-journal-aarch64-apple-darwin.tar.gz`.
 Extract the archive into a permanent folder, then run:
 
 ```bash
@@ -34,8 +53,8 @@ tar -xzf voice-journal-aarch64-apple-darwin.tar.gz
 ./voice-journal
 ```
 
-To start the downloaded app at login, run `./install-launchd.sh ./voice-journal`
-from that folder. The binary is not signed or notarized.
+To start the archive binary at login, run `./install-launchd.sh ./voice-journal`
+from that folder. The archive binary is not Developer ID signed or notarized.
 
 ## Build
 
@@ -85,12 +104,26 @@ Restart the app after editing.
 
 ## Start at login
 
+For the DMG app, open **System Settings → General → Login Items** (called
+**Login Items & Extensions** on some macOS versions), then add
+`/Applications/Voice Journal.app` under **Open at Login**.
+
+Use only one login method. If switching from the archive or source launchd
+installer, remove that service first:
+
+```bash
+bash "/Applications/Voice Journal.app/Contents/Resources/install-launchd.sh" --uninstall
+```
+
+For a source build, use the launchd installer instead:
+
 ```bash
 scripts/install-launchd.sh                      # install and start
 scripts/install-launchd.sh --uninstall          # remove
 ```
 
-Crash restarts are automatic; quitting from the tray menu stays quit. Logs go to
+With the launchd installer, crash restarts are automatic; quitting from the tray
+menu stays quit. Logs go to
 `~/Library/Logs/voice-journal.log`.
 
 ## Troubleshooting
