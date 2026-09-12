@@ -16,7 +16,7 @@ def package(root):
         raise FileNotFoundError("Build the aarch64-apple-darwin release binary first")
     if output.exists():
         raise FileExistsError(f"Refusing to overwrite {output}")
-    subprocess.run(["lipo", "-verify_arch", "arm64", str(binary)], check=True)
+    subprocess.run(["lipo", str(binary), "-verify_arch", "arm64"], check=True)
     metadata = json.loads(subprocess.check_output(
         ["cargo", "metadata", "--no-deps", "--format-version=1", "--offline", "--locked"],
         cwd=root, text=True,

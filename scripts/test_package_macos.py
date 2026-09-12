@@ -35,6 +35,9 @@ class PackagingTests(unittest.TestCase):
     def tool(self, args, **kwargs):
         self.calls.append(args)
         self.assertTrue(kwargs["check"])
+        if args[0] == "lipo":
+            self.assertTrue(Path(args[1]).is_file())
+            self.assertEqual(args[2:], ["-verify_arch", "arm64"])
         if args[:2] == ["hdiutil", "create"]:
             staging = Path(args[args.index("-srcfolder") + 1])
             app = staging / "Voice Journal.app/Contents"

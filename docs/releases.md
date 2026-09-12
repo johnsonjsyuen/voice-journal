@@ -24,7 +24,8 @@ After the existing macOS build, `python3 scripts/package-macos.py` packages
 Read the version from offline locked Cargo metadata; include the executable,
 bundle metadata (identifier `com.johnson.voice-journal`, agent/menu-bar behavior,
 minimum macOS 14.0), installation guide, license, and existing launchd helper.
-Validate the plist and ARM architecture, ad-hoc sign and verify the app, then
+Validate the plist and ARM architecture (`lipo <binary> -verify_arch arm64`;
+the input must precede the variable-length architecture list), ad-hoc sign and verify the app, then
 create and verify a compressed read-only HFS+ DMG with `hdiutil`.
 Use an isolated temporary staging directory and refuse to overwrite output.
 
