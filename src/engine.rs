@@ -94,6 +94,10 @@ impl<A: Api> Engine<A> {
                 let started = *started;
                 match self.api.stop() {
                     Ok(session) => {
+                        log::info!(
+                            "Stop acknowledged by API; waiting for transcription (session {:?})",
+                            session.id
+                        );
                         let elapsed = now.checked_duration_since(started).unwrap_or_default();
                         let deadline = now + MIN_TIMEOUT.max(elapsed.saturating_mul(3));
                         self.state = State::Finalizing {
@@ -111,6 +115,10 @@ impl<A: Api> Engine<A> {
             State::Finalizing { .. } => Update::Error("transcription still in progress".into()),
             State::Idle | State::Error { .. } => match self.api.start() {
                 Ok(session) if session.status == SessionStatus::Recording => {
+                    log::info!(
+                        "Start acknowledged by API; recording (session {:?})",
+                        session.id
+                    );
                     self.state = State::Recording {
                         id: session.id,
                         started: now,

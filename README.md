@@ -70,6 +70,16 @@ cargo build --release
 ./target/release/voice-journal
 ```
 
+The terminal shows a welcome banner, the active config and journal paths,
+hotkey, and discovered TypeWhisper API address/port. Voice Journal is an API
+client and does not listen on a network port itself. Timestamped logs show
+hotkey detection, API start/stop requests and acknowledgements, transcription
+text, and successful journal writes (or errors). Transcript text is included
+in logs, including the launch-at-login log file below.
+
+Logs default to info for Voice Journal. Use `RUST_LOG=warn` for quieter output,
+or `RUST_LOG=voice_journal=debug` to include API polling requests.
+
 A menu bar icon appears (no Dock icon):
 
 | Icon | Meaning |
