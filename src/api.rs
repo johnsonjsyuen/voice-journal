@@ -73,6 +73,7 @@ impl HttpApi {
     fn call(&mut self, method: &str, path: &str) -> Result<RecorderSession, ApiError> {
         match self.attempt(method, path) {
             Err(ApiError::Unauthorized) if self.discovery_path.is_some() => {
+                log::warn!("TypeWhisper rejected API token; reloading discovery and retrying once");
                 self.reload_discovery()?;
                 self.attempt(method, path)
             }
@@ -82,6 +83,11 @@ impl HttpApi {
 
     fn attempt(&self, method: &str, path: &str) -> Result<RecorderSession, ApiError> {
         let url = format!("{}{}", self.base, path);
+        if method == "POST" {
+            log::info!("Sending API request: {method} {url}");
+        } else {
+            log::debug!("Sending API request: {method} {url}");
+        }
         let mut request = match method {
             "GET" => self.agent.get(&url),
             "POST" => self.agent.post(&url),
@@ -115,6 +121,7 @@ impl HttpApi {
             Ok(discovery) => {
                 self.base = format!("http://127.0.0.1:{}", discovery.port);
                 self.token = discovery.token;
+                log::info!("TypeWhisper API rediscovered: {}", self.base);
                 Ok(())
             }
             Err(e) => Err(ApiError::Unavailable(e.to_string())),

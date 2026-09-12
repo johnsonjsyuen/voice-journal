@@ -43,6 +43,28 @@ pub fn run() -> Result<(), String> {
     let lock = acquire_single_instance_lock(&config_path)?;
     let cfg = config::load_or_create(&config_path).map_err(|e| e.to_string())?;
     hotkey::parse(&cfg.hotkey)?;
+    log::info!(
+        "\n\
+         +-----------------------------------------+\n\
+         |       VOICE JOURNAL                     |\n\
+         |       [mic] ---> [text] ---> [journal]   |\n\
+         +-----------------------------------------+\n\
+         Welcome! Capture spoken notes in your Markdown journal.\n\
+         Version: {}\n\
+         Config: {}\n\
+         Hotkey: {} (press to start / stop recording)\n\
+         Journal: {}\n\
+         Audio: microphone enabled, system audio disabled\n\
+         Listening port: none (connects to TypeWhisper's local API)",
+        env!("CARGO_PKG_VERSION"),
+        config_path.display(),
+        cfg.hotkey,
+        cfg.journal_path.display(),
+    );
+    match load_discovery_api() {
+        Ok(_) => {}
+        Err(message) => log::warn!("{message}; API port unknown; discovery will retry on hotkey"),
+    }
 
     let (command_tx, command_rx) = mpsc::channel();
     let (event_tx, event_rx) = mpsc::channel();
@@ -117,6 +139,19 @@ fn acquire_single_instance_lock(config_path: &Path) -> Result<File, String> {
 fn load_discovery_api() -> Result<HttpApi, String> {
     let path = discovery::discovery_path().map_err(|e| discovery_message(&e))?;
     let discovery = discovery::load(&path).map_err(|e| discovery_message(&e))?;
+    log::info!(
+        "TypeWhisper API discovered: http://127.0.0.1:{} (token {})",
+        discovery.port,
+        if discovery
+            .token
+            .as_deref()
+            .is_some_and(|token| !token.is_empty())
+        {
+            "set"
+        } else {
+            "not set"
+        }
+    );
     Ok(HttpApi::from_discovery(&discovery, path))
 }
 
@@ -254,9 +289,12 @@ impl App {
                 .as_ref()
                 .is_some_and(|handle| event.id == handle.hotkey.id());
             if matches_hotkey && event.state == HotKeyState::Pressed {
+                log::info!("Hotkey detected: {}", self.hotkey_spec);
                 self.notice = None;
                 self.no_speech = false;
-                let _ = self.commands.send(WorkerCommand::Toggle);
+                if let Err(e) = self.commands.send(WorkerCommand::Toggle) {
+                    log::error!("Failed to send hotkey toggle to recording worker: {e}");
+                }
             }
         }
     }
@@ -275,6 +313,7 @@ impl App {
                 // The worker stops/finishes any recording before it exits; the
                 // event loop stays alive until then so the final transcript can
                 // still be appended.
+                log::info!("Quit requested; finishing any active recording");
                 self.quitting = true;
                 let _ = self.commands.send(WorkerCommand::Quit);
             }
@@ -300,13 +339,26 @@ impl App {
     fn handle_worker_event(&mut self, event: WorkerEvent) {
         match event.update {
             Update::Transcribed { text, duration, .. } => {
+                log::info!(
+                    "Transcription completed (recording duration: {:.1}s)",
+                    duration.as_secs_f64()
+                );
                 self.metrics.record(text.as_deref(), duration, Local::now());
                 match text {
-                    Some(text) if !text.trim().is_empty() => self.append_transcript(&text),
-                    _ => self.no_speech = true,
+                    Some(text) if !text.trim().is_empty() => {
+                        log::info!("Transcript: {:?}", text);
+                        self.append_transcript(&text);
+                    }
+                    _ => {
+                        log::info!("No speech detected; no journal entry written");
+                        self.no_speech = true;
+                    }
                 }
             }
-            Update::Error(message) => self.notice = Some(message),
+            Update::Error(message) => {
+                log::error!("{message}");
+                self.notice = Some(message);
+            }
             Update::None => {}
         }
 
@@ -321,10 +373,15 @@ impl App {
     fn append_transcript(&mut self, text: &str) {
         match journal::append_entry(&self.journal_path, text, Local::now()) {
             Ok(()) => {
+                log::info!("Journal entry written: {}", self.journal_path.display());
                 self.notice = None;
                 self.no_speech = false;
             }
             Err(e) => {
+                log::error!(
+                    "Journal write failed ({}): {e}; attempting clipboard fallback",
+                    self.journal_path.display()
+                );
                 copy_to_clipboard(text);
                 self.notice = Some(format!(
                     "journal write failed; transcript copied to clipboard: {e}"
@@ -356,7 +413,10 @@ impl ApplicationHandler for App {
         }
         if self.hotkey.is_none() {
             match hotkey::register(&self.hotkey_spec) {
-                Ok(handle) => self.hotkey = Some(handle),
+                Ok(handle) => {
+                    self.hotkey = Some(handle);
+                    log::info!("Ready — listening for hotkey {}", self.hotkey_spec);
+                }
                 Err(e) => {
                     self.fail(event_loop, e);
                     return;
