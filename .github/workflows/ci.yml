@@ -29,9 +29,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test
+      - run: python3 -m unittest discover -s scripts -p 'test_*.py'
 
   macos:
     runs-on: macos-latest
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '14.0'
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -46,10 +49,29 @@ jobs:
           cp target/aarch64-apple-darwin/release/voice-journal dist/
           cp scripts/install-launchd.sh dist/
           tar -czf voice-journal-aarch64-apple-darwin.tar.gz -C dist .
+      - name: Package DMG
+        run: python3 scripts/package-macos.py
+      - name: Verify mounted DMG
+        shell: bash
+        run: |
+          set -euo pipefail
+          mount_dir=$(mktemp -d)
+          hdiutil attach voice-journal-aarch64-apple-darwin.dmg -readonly -nobrowse -mountpoint "$mount_dir"
+          trap 'hdiutil detach "$mount_dir"' EXIT
+          test -s "$mount_dir/INSTALL.txt"
+          test "$(readlink "$mount_dir/Applications")" = /Applications
+          app="$mount_dir/Voice Journal.app"
+          plutil -lint "$app/Contents/Info.plist"
+          codesign --verify --deep --strict "$app"
+          test -s "$app/Contents/Resources/INSTALL.txt"
+          test -x "$app/Contents/Resources/install-launchd.sh"
+          "$app/Contents/MacOS/voice-journal" --check
       - uses: actions/upload-artifact@v4
         with:
           name: voice-journal-aarch64-apple-darwin
-          path: voice-journal-aarch64-apple-darwin.tar.gz
+          path: |
+            voice-journal-aarch64-apple-darwin.tar.gz
+            voice-journal-aarch64-apple-darwin.dmg
           if-no-files-found: error
 
   release:
@@ -75,17 +97,19 @@ jobs:
           set -euo pipefail
           tag="main-${GITHUB_SHA}"
           archive="release/voice-journal-aarch64-apple-darwin.tar.gz"
+          dmg="release/voice-journal-aarch64-apple-darwin.dmg"
           test -s "$archive"
+          test -s "$dmg"
           if draft=$(gh release view "$tag" --json isDraft --jq '.isDraft'); then
             if [[ "$draft" == "true" ]]; then
-              gh release upload "$tag" "$archive" --clobber
+              gh release upload "$tag" "$archive" "$dmg" --clobber
               gh release edit "$tag" --draft=false
             else
               echo "Release $tag is already published."
             fi
           else
-            gh release create "$tag" "$archive" \
+            gh release create "$tag" "$archive" "$dmg" \
               --target "$GITHUB_SHA" \
               --title "Voice Journal ${GITHUB_SHA:0:12}" \
-              --notes "macOS Apple Silicon build of commit ${GITHUB_SHA}. Requires macOS 14+ and TypeWhisper 1.6+. See the README for installation."
+              --notes "macOS Apple Silicon build of commit ${GITHUB_SHA}. Requires macOS 14+ and TypeWhisper 1.6+. Download the DMG, drag Voice Journal.app to Applications, and read INSTALL.txt inside the disk image. The app is ad-hoc signed, not Developer ID signed or notarized. See the README for first-open instructions."
           fi
