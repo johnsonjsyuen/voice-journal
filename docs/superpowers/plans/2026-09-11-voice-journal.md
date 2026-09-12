@@ -1,6 +1,6 @@
 # Voice Journal Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** A macOS menu-bar Rust binary that toggles TypeWhisper recording on a global hotkey and appends the Granite-transcribed speech as a timestamped bullet to a dedicated Markdown journal file.
 
@@ -56,7 +56,7 @@
 - Create: `Cargo.toml`, `.gitignore`, `LICENSE`, `src/lib.rs`, `src/journal.rs`
 - Test: in-module `#[cfg(test)]` in `src/journal.rs`
 
-- [ ] **Step 1: Scaffold**
+- [x] **Step 1: Scaffold**
 
 ```bash
 cd /home/johnson/code/voice-journal
@@ -88,7 +88,7 @@ httpmock = "0.7"
 
 `LICENSE`: standard MIT text, copyright `2026 Johnson Yuen`.
 
-- [ ] **Step 2: Write failing tests** in `src/journal.rs`
+- [x] **Step 2: Write failing tests** in `src/journal.rs`
 
 ```rust
 #[cfg(test)]
@@ -160,15 +160,33 @@ mod tests {
         append_entry(&path, "hi", ts()).unwrap();
         assert!(path.exists());
     }
+
+    #[test]
+    fn writes_header_into_empty_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.md");
+        std::fs::write(&path, "").unwrap();
+        append_entry(&path, "first", ts()).unwrap();
+        let got = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(got, "# Voice Journal\n\n- 2026-09-11 14:32 — first\n");
+    }
+
+    #[test]
+    fn unwritable_path_returns_io_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("adir");
+        std::fs::create_dir(&path).unwrap();
+        assert!(matches!(append_entry(&path, "hi", ts()), Err(JournalError::Io(_))));
+    }
 }
 ```
 
-- [ ] **Step 3: Run tests, verify failure**
+- [x] **Step 3: Run tests, verify failure**
 
 Run: `cargo test journal -- --nocapture`
 Expected: compile error, `format_entry` not found.
 
-- [ ] **Step 4: Implement `src/journal.rs`**
+- [x] **Step 4: Implement `src/journal.rs`**
 
 ```rust
 use chrono::{DateTime, Local};
@@ -198,21 +216,22 @@ pub fn append_entry(path: &Path, text: &str, now: DateTime<Local>) -> Result<(),
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let exists = path.exists();
-    let needs_leading_newline = if exists {
-        use std::io::Read;
-        let mut f = std::fs::File::open(path)?;
-        let mut buf = Vec::new();
-        f.read_to_end(&mut buf)?;
-        !buf.is_empty() && !buf.ends_with(b"\n")
-    } else {
-        false
-    };
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    if !exists {
+    let mut file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .append(true)
+        .open(path)?;
+    let len = file.metadata()?.len();
+    if len == 0 {
         file.write_all(HEADER.as_bytes())?;
-    } else if needs_leading_newline {
-        file.write_all(b"\n")?;
+    } else {
+        use std::io::{Read, Seek, SeekFrom};
+        file.seek(SeekFrom::End(-1))?;
+        let mut last = [0u8; 1];
+        file.read_exact(&mut last)?;
+        if last[0] != b'\n' {
+            file.write_all(b"\n")?;
+        }
     }
     file.write_all(format_entry(text, now).as_bytes())?;
     file.flush()?;
@@ -220,7 +239,7 @@ pub fn append_entry(path: &Path, text: &str, now: DateTime<Local>) -> Result<(),
 }
 ```
 
-- [ ] **Step 5: `src/lib.rs`**
+- [x] **Step 5: `src/lib.rs`**
 
 ```rust
 pub mod api;
@@ -233,12 +252,12 @@ pub mod journal;
 
 Create empty stubs (`api.rs`, `check.rs`, `config.rs`, `discovery.rs`, `engine.rs`) with a doc comment so the crate compiles.
 
-- [ ] **Step 6: Run tests to verify pass**
+- [x] **Step 6: Run tests to verify pass**
 
 Run: `cargo test journal`
 Expected: 7 passed.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add Cargo.toml Cargo.lock .gitignore LICENSE src
@@ -251,7 +270,7 @@ git commit -m "feat: scaffold crate and append-only journal writer"
 
 **Files:** Create/replace `src/config.rs`; Test in-module.
 
-- [ ] **Step 1: Failing tests**
+- [x] **Step 1: Failing tests**
 
 ```rust
 #[cfg(test)]
@@ -295,18 +314,27 @@ journal_path = "/tmp/j.md""#).unwrap();
     }
 
     #[test]
-    fn env_override_changes_config_path() {
+    fn explicit_config_path_overrides_default() {
+        let path = config_path_from(Some("/tmp/custom.toml")).unwrap();
+        assert_eq!(path, std::path::PathBuf::from("/tmp/custom.toml"));
+        let default_like = config_path_from(Some("")).unwrap();
+        assert!(default_like.ends_with("voice-journal/config.toml"));
+    }
+
+    #[test]
+    fn created_config_round_trips_with_expanded_path() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("custom.toml");
-        std::env::set_var("VOICE_JOURNAL_CONFIG", &path);
-        assert_eq!(config_path().unwrap(), path);
-        std::env::remove_var("VOICE_JOURNAL_CONFIG");
+        let path = dir.path().join("config.toml");
+        let created = load_or_create(&path).unwrap();
+        let loaded = load(&path).unwrap();
+        assert_eq!(created, loaded);
+        assert!(!loaded.journal_path.to_string_lossy().starts_with('~'));
     }
 }
 ```
 
-- [ ] **Step 2: Run failing**: `cargo test config` → compile error.
-- [ ] **Step 3: Implement**
+- [x] **Step 2: Run failing**: `cargo test config` → compile error.
+- [x] **Step 3: Implement**
 
 ```rust
 use serde::{Deserialize, Serialize};
@@ -320,8 +348,10 @@ pub struct Config {
     pub journal_path: PathBuf,
 }
 
+const DEFAULT_JOURNAL_PATH: &str = "~/Documents/VoiceJournal.md";
+
 fn default_hotkey() -> String { "Ctrl+Alt+KeyJ".into() }
-fn default_journal_path() -> PathBuf { expand_tilde("~/Documents/VoiceJournal.md") }
+fn default_journal_path() -> PathBuf { expand_tilde(DEFAULT_JOURNAL_PATH) }
 
 impl Default for Config {
     fn default() -> Self { Config { hotkey: default_hotkey(), journal_path: default_journal_path() } }
@@ -339,15 +369,24 @@ pub enum ConfigError {
     NoHome,
 }
 
-pub fn config_path() -> Result<PathBuf, ConfigError> {
-    if let Ok(p) = std::env::var("VOICE_JOURNAL_CONFIG") {
+pub fn config_path_from(env_value: Option<&str>) -> Result<PathBuf, ConfigError> {
+    if let Some(p) = env_value.filter(|v| !v.is_empty()) {
         return Ok(PathBuf::from(p));
     }
     let dir = dirs::config_dir().ok_or(ConfigError::NoHome)?.join("voice-journal");
     Ok(dir.join("config.toml"))
 }
 
+pub fn config_path() -> Result<PathBuf, ConfigError> {
+    config_path_from(std::env::var("VOICE_JOURNAL_CONFIG").ok().as_deref())
+}
+
 pub fn expand_tilde(input: &str) -> PathBuf {
+    if input == "~" {
+        if let Some(home) = dirs::home_dir() {
+            return home;
+        }
+    }
     if let Some(rest) = input.strip_prefix("~/") {
         if let Some(home) = dirs::home_dir() {
             return home.join(rest);
@@ -357,8 +396,11 @@ pub fn expand_tilde(input: &str) -> PathBuf {
 }
 
 pub fn parse(s: &str) -> Result<Config, ConfigError> {
-    let c: Config = toml::from_str(s)?;
-    if c.hotkey.trim().is_empty() { return Err(ConfigError::EmptyHotkey); }
+    let mut c: Config = toml::from_str(s)?;
+    if c.hotkey.trim().is_empty() {
+        return Err(ConfigError::EmptyHotkey);
+    }
+    c.journal_path = expand_tilde(&c.journal_path.to_string_lossy());
     Ok(c)
 }
 
@@ -369,8 +411,8 @@ pub fn load_or_create(path: &Path) -> Result<Config, ConfigError> {
     let default = Config::default();
     if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
     let body = format!(
-        "# Global toggle hotkey (global-hotkey key syntax).\nhotkey = \"{}\"\n\n# Journal destination. ~ is expanded.\njournal_path = \"~/Documents/VoiceJournal.md\"\n",
-        default.hotkey
+        "# Global toggle hotkey (global-hotkey key syntax).\nhotkey = \"{}\"\n\n# Journal destination. ~ is expanded.\njournal_path = \"{}\"\n",
+        default.hotkey, DEFAULT_JOURNAL_PATH
     );
     std::fs::write(path, body)?;
     Ok(default)
@@ -381,8 +423,8 @@ pub fn load(config_path: &Path) -> Result<Config, ConfigError> {
 }
 ```
 
-- [ ] **Step 4: `cargo test config`** → 6 passed.
-- [ ] **Step 5: Commit**: `git commit -am "feat: config load/create with defaults"`
+- [x] **Step 4: `cargo test config`** → 6 passed.
+- [x] **Step 5: Commit**: `git commit -am "feat: config load/create with defaults"`
 
 ---
 
@@ -390,7 +432,7 @@ pub fn load(config_path: &Path) -> Result<Config, ConfigError> {
 
 **Files:** `src/discovery.rs`.
 
-- [ ] **Step 1: Failing tests** — valid file parses port+token; missing file → `DiscoveryError::Missing`; corrupt JSON → `DiscoveryError::Parse`; omitted token → `None`.
+- [x] **Step 1: Failing tests** — valid file parses port+token; missing file → `DiscoveryError::Missing`; corrupt JSON → `DiscoveryError::Parse`; omitted token → `None`.
 
 ```rust
 #[cfg(test)]
@@ -430,8 +472,8 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run failing**: `cargo test discovery`.
-- [ ] **Step 3: Implement**
+- [x] **Step 2: Run failing**: `cargo test discovery`.
+- [x] **Step 3: Implement**
 
 ```rust
 use serde::Deserialize;
@@ -469,8 +511,8 @@ pub fn load(path: &Path) -> Result<Discovery, DiscoveryError> {
 }
 ```
 
-- [ ] **Step 4: `cargo test discovery`** → 4 passed.
-- [ ] **Step 5: Commit**: `git commit -am "feat: TypeWhisper discovery file parsing"`
+- [x] **Step 4: `cargo test discovery`** → 4 passed.
+- [x] **Step 5: Commit**: `git commit -am "feat: TypeWhisper discovery file parsing"`
 
 ---
 
@@ -478,13 +520,13 @@ pub fn load(path: &Path) -> Result<Discovery, DiscoveryError> {
 
 **Files:** `src/api.rs`; integration tests in `tests/recorder_flow.rs` (Task 5 adds flow).
 
-- [ ] **Step 1: Implement types + client contract** (agents implement tests first; below is the required interface)
+- [x] **Step 1: Implement types + client contract** (agents implement tests first; below is the required interface)
 
 ```rust
 pub trait Api: Send + Sync {
-    fn start(&self) -> Result<RecorderSession, ApiError>;
-    fn stop(&self) -> Result<RecorderSession, ApiError>;
-    fn session(&self, id: &str) -> Result<RecorderSession, ApiError>;
+    fn start(&mut self) -> Result<RecorderSession, ApiError>;
+    fn stop(&mut self) -> Result<RecorderSession, ApiError>;
+    fn session(&mut self, id: &str) -> Result<RecorderSession, ApiError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -507,16 +549,18 @@ pub enum SessionStatus { Recording, Finalizing, Completed, Failed }
 pub enum ApiError {
     #[error("TypeWhisper API unavailable: {0}")]
     Unavailable(String),
+    #[error("TypeWhisper API token rejected (401)")]
+    Unauthorized,
     #[error("TypeWhisper HTTP {status}: {message}")]
     Http { status: u16, message: String },
     #[error("invalid TypeWhisper response: {0}")]
     InvalidResponse(String),
 }
 
-pub struct HttpApi { agent: ureq::Agent, base: String, token: Option<String> }
+pub struct HttpApi { agent: ureq::Agent, base: String, token: Option<String>, discovery_path: Option<PathBuf> }
 impl HttpApi {
-    pub fn new(port: u16, token: Option<String>) -> Self;
-    pub fn from_discovery(d: &Discovery) -> Self;
+    pub fn new(port: u16, token: Option<String>) -> Self;                 // discovery_path: None
+    pub fn from_discovery(d: &Discovery, path: PathBuf) -> Self;
 }
 ```
 
@@ -526,10 +570,10 @@ Behavior:
 - `session`: `GET {base}/v1/recorder/session?id={id}`.
 - Always send `Authorization: Bearer <token>` when token is `Some`.
 - Timeouts: connect 1 s, overall 5 s (`ureq::AgentBuilder`).
-- Map `ureq::Error::Status(code, resp)` to `ApiError::Http` with the body's `error.message` if parseable, else the raw status text; transport errors to `Unavailable`.
-- Non-2xx from `call()` arrives as `Error::Status`; success codes 200 only.
+- Map `ureq::Error::Status(code, resp)` to `ApiError::Http` with the body's `error.message` if parseable, else the raw status text; transport errors to `Unavailable`; status 401 to `Unauthorized`.
+- **401 recovery (spec §10):** every request goes through a private `call` helper. On `ApiError::Unauthorized` with a `discovery_path` present, re-read the discovery file, replace `base`/`token`, and retry the request exactly once; a second 401 returns `Unauthorized`.
 
-- [ ] **Step 2: Required tests** (in `src/api.rs` `#[cfg(test)]` using `httpmock`)
+- [x] **Step 2: Required tests** (in `src/api.rs` `#[cfg(test)]` using `httpmock`)
 
 | Test | Mock | Assert |
 |---|---|---|
@@ -539,10 +583,14 @@ Behavior:
 | `session_parses_failed` | → `{"id":"a","status":"failed","error":"finalTranscription: boom"}` | status Failed, error text preserved |
 | `auth_header_sent_when_token_present` | any route, assert header `Authorization == Bearer tok` | header matches |
 | `status_409_maps_to_http_error` | `{"error":{"code":"bad_request","message":"Already recording"}}`, status 409 | `ApiError::Http { status: 409, message }` contains "Already recording" |
+| `status_401_maps_to_unauthorized` | status 401, any body, no discovery file | `ApiError::Unauthorized` |
+| `unauthorized_reloads_discovery_and_retries_once` | temp discovery file; first request 401, second 200 with corrected token | success on retry; second request carries the new token |
+| `persistent_unauthorized_stops_after_one_retry` | temp discovery file; both requests 401 | `ApiError::Unauthorized`; exactly 2 requests made, second carrying `Bearer new` |
+| `invalid_json_response_is_invalid_response` | 200 with non-JSON body | `ApiError::InvalidResponse` |
 | `connection_refused_is_unavailable` | port 1 (no listener) | `ApiError::Unavailable` |
 
-- [ ] **Step 3: Run** `cargo test api` → pass.
-- [ ] **Step 4: Commit**: `git commit -am "feat: TypeWhisper recorder HTTP client"`
+- [x] **Step 3: Run** `cargo test api` → pass.
+- [x] **Step 4: Commit**: `git commit -am "feat: TypeWhisper recorder HTTP client"`
 
 ---
 
@@ -550,13 +598,13 @@ Behavior:
 
 **Files:** `src/engine.rs`; `tests/recorder_flow.rs`.
 
-- [ ] **Step 1: Required interface**
+- [x] **Step 1: Required interface**
 
 ```rust
 pub enum State {
     Idle,
     Recording { id: String, started: Instant },
-    Finalizing { id: String, deadline: Instant },
+    Finalizing { id: String, deadline: Instant, output_file: Option<String> },
     Error { message: String },
 }
 
@@ -579,12 +627,12 @@ impl<A: Api> Engine<A> {
 
 Behavior:
 - `toggle` from `Idle | Error`: `api.start()`; Recording response → `Recording{id, started: now}`; error → `Error`.
-- `toggle` from `Recording`: `api.stop()`; success → `Finalizing{id: stopped id, deadline: now + max(120s, 3×elapsed)}`; error → `Error`.
-- `toggle` while `Finalizing` → `Update::None` (ignored).
-- `tick` when not `Finalizing` → `None`; when `Finalizing`: past deadline → `Error("timed out...")`; session `Completed` → `Idle`, `Transcribed{text, output_file}`; `Failed` → `Error(error or "transcription failed")`; `Recording | Finalizing` status → `None`; API error → `Error`.
+- `toggle` from `Recording`: `api.stop()`; success → `Finalizing{id: stopped id, deadline: now + max(120s, 3×elapsed), output_file: None}`; error → `Error`.
+- `toggle` while `Finalizing` → `Update::Error("transcription still in progress")`, state stays `Finalizing`, no API call (spec §7 transient feedback).
+- `tick` when not `Finalizing` → `None`; when `Finalizing`: past deadline → `log::warn!` last-known `output_file` (if any) then `Error("timed out...")`; session `Completed` → `Idle`, `Transcribed{text, output_file}`; `Failed` → `log::warn!` the session `output_file` (spec §10: a recording is never lost silently) then `Error(error or "transcription failed")`; `Recording | Finalizing` status → remember `output_file` in state, return `None`; API error → `Error`.
 - `Error` state is sticky only until next `toggle`, which retries from scratch.
 
-- [ ] **Step 2: Required unit tests** with a `MockApi` (`RefCell<VecDeque<Result<RecorderSession, ApiError>>>`):
+- [x] **Step 2: Required unit tests** with a `MockApi` (`RefCell<VecDeque<Result<RecorderSession, ApiError>>>`):
 
 | Test | Behavior verified |
 |---|---|
@@ -592,16 +640,20 @@ Behavior:
 | `start_error_enters_error_and_next_toggle_retries` | start Err → Error; next toggle calls start again |
 | `failed_session_surfaces_provider_error` | tick → `Update::Error("finalTranscription: boom")` |
 | `timeout_produces_error` | tick at `deadline + 1s` → Error containing "timed out" |
-| `toggle_during_finalizing_is_ignored` | no extra API calls |
+| `toggle_during_finalizing_is_ignored` | returns `Update::Error` containing "still in progress", state remains `Finalizing`, no extra API calls |
 | `empty_text_is_transcribed_with_none_text` | Transcribed `text: None` (caller skips journal) |
 | `deadline_is_at_least_120s` | stop at now; tick just before 120s → None (still polling) |
+| `deadline_scales_with_long_recording` | start at t0, stop at t0+100s; deadline = stop + 3×100s = t0+400s; tick at t0+399s → None, tick at t0+401s → Error (proves 3×recorded-duration binds) |
+| `stop_error_enters_error` | `api.stop()` Err → `Update::Error` and state Error |
+| `session_api_error_enters_error` | `api.session()` Err during Finalizing → `Update::Error` |
+| `non_recording_start_response_enters_error` | start returns `Completed` → Error "unexpected start status" |
 
-- [ ] **Step 3: Integration test `tests/recorder_flow.rs`**
+- [x] **Step 3: Integration test `tests/recorder_flow.rs`**
 
 Use `httpmock` to mock all three endpoints (start → finalizing → completed with text) and a `tempfile` journal path. Drive `Engine<HttpApi>` by hand with synthetic `Instant`s (no sleeps), then `journal::append_entry` on the `Transcribed` update, and assert the journal contains exactly one bullet with the transcript.
 
-- [ ] **Step 4: Run** `cargo test engine recorder_flow` → pass.
-- [ ] **Step 5: Commit**: `git commit -am "feat: recorder engine state machine and flow test"`
+- [x] **Step 4: Run** `cargo test engine recorder_flow` → pass.
+- [x] **Step 5: Commit**: `git commit -am "feat: recorder engine state machine and flow test"`
 
 ---
 
@@ -609,26 +661,27 @@ Use `httpmock` to mock all three endpoints (start → finalizing → completed w
 
 **Files:** `src/check.rs`, `src/main.rs`.
 
-- [ ] **Step 1: Implement `check.rs`**
+- [x] **Step 1: Implement `check.rs`**
 
 ```rust
 pub struct Report { pub lines: Vec<String>, pub ok: bool }
-pub fn run(config_path: &Path) -> Report;
+pub fn run(config_path: &Path, discovery_path: &Path) -> Report;
+pub fn run_cli() -> i32; // resolves paths via config::config_path() and discovery::discovery_path(); prints lines; 0/1
 ```
 
 Checks, in order:
 1. Config loads (or is created) — fail → `ok = false`.
-2. Journal parent directory exists or is creatable and writable — fail → `ok = false`. Do not create the journal file.
+2. Journal parent directory exists or is creatable and writable — probe by `create_dir_all(parent)` then creating and deleting a `*.probe` file in it; fail → `ok = false`. Do not create the journal file itself.
 3. Journal path reported.
 4. Hotkey string non-empty — fail → `ok = false`.
 5. Discovery file: present → report port + token present/absent; missing → warning line, **does not** flip `ok`.
 On macOS additionally attempt `global_hotkey::hotkey::HotKey::from_str(&cfg.hotkey)` and fail `ok` if unparseable; error message must include the accepted syntax example `Ctrl+Alt+KeyJ`.
 
-- [ ] **Step 2: Implement `main.rs`**
+- [x] **Step 2: Implement `main.rs`**
 
 ```rust
 fn main() {
-    env_logger::init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
     match std::env::args().nth(1).as_deref() {
         Some("--check") => std::process::exit(check::run_cli()),
         Some("--version") | Some("-V") => { println!("voice-journal {}", env!("CARGO_PKG_VERSION")); }
@@ -652,9 +705,9 @@ fn run_daemon() { eprintln!("voice-journal daemon runs on macOS only (use --chec
 pub mod platform;
 ```
 
-- [ ] **Step 3: Tests**: `--check` with `VOICE_JOURNAL_CONFIG` pointing at a temp config and a missing discovery path returns ok=true (discovery absent is a warning); an invalid TOML returns ok=false.
-- [ ] **Step 4: Manual**: `cargo run -- --check; echo $?` on Linux prints report and `0`.
-- [ ] **Step 5: Commit**: `git commit -am "feat: headless --check report and CLI dispatch"`
+- [x] **Step 3: Tests**: `--check` with `VOICE_JOURNAL_CONFIG` pointing at a temp config and a missing discovery path returns ok=true (discovery absent is a warning); an invalid TOML returns ok=false.
+- [x] **Step 4: Manual**: `cargo run -- --check; echo $?` on Linux prints report and `0`.
+- [x] **Step 5: Commit**: `git commit -am "feat: headless --check report and CLI dispatch"`
 
 ---
 
@@ -664,7 +717,21 @@ pub mod platform;
 
 **Spike requirement:** this task is the design's spike #1/#2. First commit a minimal `hotkey.rs` + event loop that only logs events, run CI; then add tray and worker wiring.
 
-- [ ] **Step 1: `hotkey.rs`**
+- [x] **Step 0: dependency + single-instance lock**
+
+Run: `cargo add --target 'cfg(target_os = "macos")' fs4` (flock; version pinned by cargo add).
+
+At daemon startup, before registering the hotkey or building the tray:
+
+```rust
+let dir = config::config_path()?.parent().unwrap().to_path_buf();
+std::fs::create_dir_all(&dir)?;
+let lock_file = std::fs::OpenOptions::new().create(true).read(true).write(true).open(dir.join("adapter.lock"))?;
+fs4::fs_std::FileExt::try_lock_exclusive(&lock_file).map_err(|_| "voice-journal is already running")?;
+// keep `lock_file` alive for the process lifetime
+```
+
+- [x] **Step 1: `hotkey.rs`**
 
 ```rust
 pub struct HotkeyHandle { _manager: GlobalHotKeyManager, pub id: HotKeyId }
@@ -672,7 +739,7 @@ pub fn register(spec: &str) -> Result<HotkeyHandle, String>;
 pub fn parse(spec: &str) -> Result<HotKey, String>; // wraps FromStr with a helpful error listing "Ctrl+Alt+KeyJ"
 ```
 
-- [ ] **Step 2: `tray.rs`**
+- [x] **Step 2: `tray.rs`**
 
 - `TrayIconBuilder::new()`, menu via `tray_icon::menu::{Menu, MenuItem}` with disabled status item, `Open Journal…`, `Open Config…`, `Quit`.
 - Icons built in code with `tray_icon::Icon::from_rgba` (16×16 and 32×32):
@@ -683,35 +750,49 @@ pub fn parse(spec: &str) -> Result<HotKey, String>; // wraps FromStr with a help
 - Menu event handling via `MenuEvent::receiver()` in `about_to_wait`.
 - `Open Journal…` / `Open Config…` shell out to `/usr/bin/open`.
 
-- [ ] **Step 3: `mod.rs` — wiring**
+- [x] **Step 3: `mod.rs` — wiring**
 
 ```
 main thread (winit ApplicationHandler):
+  acquire single-instance flock (Step 0)
   create GlobalHotKeyManager + register configured hotkey
   build tray
   spawn worker thread owning Engine<HttpApi> and an mpsc::Receiver<Command>
   about_to_wait():
-    drain HotKeyEvent::receiver() -> on Pressed send Command::Toggle
+    drain worker updates FIRST (so a queued error is rendered before a hotkey press clears it)
+    drain HotKeyEvent::receiver() -> on Pressed clear notice, send Command::Toggle
     drain tray/menu receivers -> menu actions, Command::Toggle, Command::Quit
     drain mpsc::Receiver<Update>:
-      Update::Transcribed { text: Some(t) } if !t.trim().is_empty() -> journal::append_entry
+      Update::Transcribed { text: Some(t) } if !t.trim().is_empty() ->
+        match journal::append_entry(journal_path, &t, Local::now()):
+          Ok(())  -> tray idle
+          Err(e)  -> transcript copied to clipboard via `pbcopy` (stdin) so speech is not lost,
+                     tray error "journal write failed; transcript copied to clipboard: {e}"
       Update::Transcribed { text: None|empty } -> tray tooltip "No speech detected"
       Update::Error(m) -> tray error state
     update tray from engine state snapshot sent by worker
     event_loop.set_control_flow(ControlFlow::WaitUntil(now + 100ms))
 worker thread:
   loop { recv_timeout(250ms):
-    Command::Toggle -> api = HttpApi::from_discovery(discovery::load(...)?); engine.toggle(Instant::now())
-    Command::Quit -> std::process::exit(0)
-    timeout -> engine.tick(Instant::now())
+    Command::Toggle ->
+      if engine state is Recording|Finalizing -> engine.toggle(Instant::now())   // never swallow a stop; stale API will fail into Error
+      else -> discovery::load; on Err send Update::Error (state snapshot None) with spec §10 wording for Missing
+              ("TypeWhisper API unavailable — enable API Server in Settings → Advanced"); on Ok rebuild
+              Engine::new(HttpApi::from_discovery(&d, path)) and engine.toggle(Instant::now())
+    Command::Quit -> if engine state is Recording, best-effort engine.toggle(Instant::now()) to POST stop
+                    (ignore result, so TypeWhisper finalizes instead of leaving the mic hot); then break
+                    (main thread exits the event loop)
+    timeout -> engine.tick(Instant::now()) if an engine exists
     send Update + state snapshot to main
   }
 ```
 
-Discovery is re-read on every `Toggle` so port/token rotations are picked up. On discovery/API error the worker sends `Update::Error` and remains in `Error` state (next toggle retries).
+Main-thread error notice rules: `Update::Error(m)` sets a sticky notice and renders the error tray state even when the worker sent no state snapshot; periodic state snapshots never override a sticky notice; the notice clears when the next hotkey press begins a new attempt. Quit is executed on the main thread via `event_loop.exit()`; the worker never calls `process::exit`.
 
-- [ ] **Step 4: Platform gating test**: `cargo build` on Linux must not compile `platform/macos`; `cargo build` on macOS CI must succeed.
-- [ ] **Step 5: Commit**: `git commit -am "feat: macOS hotkey, tray, and worker wiring"`
+Discovery is re-read on every `Toggle` so port/token rotations are picked up. `HttpApi` additionally re-reads discovery and retries once on a 401 (Task 4). On discovery/API error the worker sends `Update::Error` while remaining in `Error` state (next toggle retries).
+
+- [x] **Step 4: Platform gating test**: `cargo build` on Linux must not compile `platform/macos`; `cargo build` on macOS CI must succeed.
+- [x] **Step 5: Commit**: `git commit -am "feat: macOS hotkey, tray, and worker wiring"`
 
 ---
 
@@ -750,7 +831,11 @@ cat > "$PLIST" <<PLIST_EOF
   <key>ProgramArguments</key>
   <array><string>$BIN</string></array>
   <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
   <key>StandardOutPath</key><string>$HOME/Library/Logs/voice-journal.log</string>
   <key>StandardErrorPath</key><string>$HOME/Library/Logs/voice-journal.log</string>
 </dict>
@@ -762,7 +847,7 @@ launchctl bootstrap "gui/$(id -u)" "$PLIST"
 echo "Installed and started $LABEL ($BIN)"
 ```
 
-- [ ] **Step 1:** Write file, `chmod +x`, `bash -n scripts/install-launchd.sh` (syntax check on any OS), commit.
+- [x] **Step 1:** Write file, `chmod +x`, `bash -n scripts/install-launchd.sh` (syntax check on any OS), commit.
 
 ---
 
@@ -811,23 +896,23 @@ jobs:
       - run: ./target/release/voice-journal --check
 ```
 
-- [ ] **Step 1:** Write file, commit.
-- [ ] **Step 2:** Push and verify all three jobs green via `gh run watch`.
+- [x] **Step 1:** Write file, commit.
+- [x] **Step 2:** Push and verify all three jobs green via `gh run watch`.
 
 ---
 
 ### Task 10: Repo creation, push, CI verification
 
-- [ ] **Step 1:** Ensure spec + plan are committed and `docs/superpowers/` is tracked.
-- [ ] **Step 2:** Create the public repo and push:
+- [x] **Step 1:** Ensure spec + plan are committed and `docs/superpowers/` is tracked.
+- [x] **Step 2:** Create the public repo and push:
 
 ```bash
 gh repo create voice-journal --public --source=. --remote=origin --description "macOS push-to-talk voice journaling: global hotkey → TypeWhisper Granite STT → append-only markdown" --push
 ```
 
-- [ ] **Step 3:** `gh run list` then `gh run watch <id> --exit-status` for the pushed commit.
-- [ ] **Step 4:** Fix CI failures (likely candidates: `tray-icon`/`winit` API versions, clippy lints) and push until `lint`, `test`, and `macos` are green. Do not mark complete until all three pass.
-- [ ] **Step 5:** Report the repo URL and CI run URL. GUI behaviors (tray icon, hotkey, real TypeWhisper round-trip) are listed in the spec §14 manual checklist for the user's Mac.
+- [x] **Step 3:** `gh run list` then `gh run watch <id> --exit-status` for the pushed commit.
+- [x] **Step 4:** Fix CI failures (likely candidates: `tray-icon`/`winit` API versions, clippy lints) and push until `lint`, `test`, and `macos` are green. Do not mark complete until all three pass.
+- [x] **Step 5:** Report the repo URL and CI run URL. GUI behaviors (tray icon, hotkey, real TypeWhisper round-trip) are listed in the spec §14 manual checklist for the user's Mac.
 
 ---
 

@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets -- -D warnings
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release
+      - run: cargo test
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: ./target/release/voice-journal --check
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp target/release/voice-journal dist/
+          cp scripts/install-launchd.sh dist/
+          tar -czf voice-journal-aarch64-apple-darwin.tar.gz -C dist .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: voice-journal-aarch64-apple-darwin
+          path: voice-journal-aarch64-apple-darwin.tar.gz
+          if-no-files-found: error
